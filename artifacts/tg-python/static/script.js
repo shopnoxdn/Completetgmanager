@@ -14,6 +14,7 @@ const state = {
   selectedPhones: new Set(),
   pendingZipFile: null,
   sessionCounts: {},
+  accountDisplayLimit: 60,
 };
 
 /* ══════════ API ══════════ */
@@ -425,7 +426,9 @@ async function loadAccounts() {
     state.accounts = accounts || [];
     renderAccounts(state.accounts);
     updateStats();
-    populateAccountSelects();
+    if (['botrefer', 'sessiondl', 'more', 'sendmsg', 'joinchannel'].includes(state.currentPage)) {
+      populateAccountSelects();
+    }
     updateBotAllCount();
     updateDlCount();
     const badge = document.getElementById('acct-badge');
@@ -435,8 +438,6 @@ async function loadAccounts() {
     }
     const allJoin = document.getElementById('all-join-count');
     if (allJoin) allJoin.textContent = state.accounts.length + ' accts';
-    // Load session counts in background (no await — don't block render)
-    if (state.accounts.length) loadSessionCounts();
   } catch (e) {
     toast('Failed to load: ' + e.message, 'error');
   }
@@ -505,6 +506,7 @@ function renderCountrySummary(accounts) {
     button.addEventListener('click', () => {
       const input = document.getElementById('search-input');
       if (input) input.value = button.dataset.country || '';
+      state.accountDisplayLimit = 60;
       renderAccounts(state.accounts);
       input?.focus();
     });
@@ -534,7 +536,9 @@ function renderAccounts(accounts) {
     return;
   }
 
-  container.innerHTML = filtered.map(a => {
+  const visible = filtered.slice(0, state.accountDisplayLimit);
+  const remaining = filtered.length - visible.length;
+  container.innerHTML = visible.map(a => {
     const initials = ((a.firstName||'?')[0] + (a.lastName ? a.lastName[0] : '')).toUpperCase();
     const loginDuration = formatLoginDuration(a.loggedInAt);
     const serialNum = accounts.indexOf(a) + 1;
@@ -569,7 +573,16 @@ function renderAccounts(accounts) {
           </div>
         </div>
       </div>`;
-  }).join('');
+  }).join('') + (remaining > 0 ? `
+    <div class="account-load-more" style="grid-column:1/-1">
+      <span>Showing ${visible.length} of ${filtered.length} accounts</span>
+      <button class="btn btn-secondary btn-sm" type="button" onclick="loadMoreAccounts()">Load 60 more</button>
+    </div>` : '');
+}
+
+function loadMoreAccounts() {
+  state.accountDisplayLimit += 60;
+  renderAccounts(state.accounts);
 }
 
 /* ══════════ SELECT MODE ══════════ */
@@ -743,6 +756,11 @@ async function uploadSessions() {
   if (!state.pendingZipFile) return toast('আগে ZIP ফাইল select করুন', 'warn');
   const btn = document.getElementById('btn-upload-sessions');
   setLoading(btn, true);
+  const progress = document.getElementById('upload-progress');
+  if (progress) {
+    progress.textContent = 'Importing sessions in parallel… please keep this page open.';
+    progress.style.display = 'block';
+  }
   const formData = new FormData();
   formData.append('file', state.pendingZipFile);
   try {
@@ -760,7 +778,7 @@ async function uploadSessions() {
             <div class="card-title">Result: ${ok} logged in${fail ? ', ' + fail + ' failed' : ''}</div>
           </div>
           <div class="result-list">
-            ${results.map(x => `
+            ${results.slice(0, 120).map(x => `
               <div class="result-item ${x.success ? 'ok' : 'fail'}">
                 <span style="color:${x.success?'var(--success)':'var(--danger)'};font-weight:800">${x.success?'✓':'✕'}</span>
                 <span style="font-family:var(--mono);font-size:11px">${esc(x.phone)}</span>
@@ -768,7 +786,8 @@ async function uploadSessions() {
                 ${x.error ? `<span style="color:var(--text-dim);margin-left:auto;font-size:10px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(x.error)}</span>` : ''}
               </div>`).join('')}
           </div>
-        </div>`;
+            </div>
+            ${results.length > 120 ? `<div class="text-dim text-sm" style="padding:10px 0">Showing the first 120 of ${results.length} results.</div>` : ''}`;
     }
     toast(`${ok} নাম্বার imported${fail ? ', ' + fail + ' failed' : ''}`, fail && !ok ? 'error' : ok ? 'success' : 'warn');
     state.pendingZipFile = null;
@@ -776,15 +795,20 @@ async function uploadSessions() {
     if (zoneText) zoneText.textContent = 'Click or drag ZIP file here';
     document.getElementById('session-zip-input').value = '';
     if (btn) btn.disabled = true;
+    if (progress) progress.style.display = 'none';
     if (ok > 0) loadAccounts();
   } catch (e) {
     toast('Error: ' + e.message, 'error');
+    if (progress) progress.style.display = 'none';
   }
   setLoading(btn, false);
 }
 
 function populateAccountSelects() {
-  document.querySelectorAll('.account-select').forEach(sel => {
+  const page = document.getElementById(`page-${state.currentPage}`);
+  const selects = page?.querySelectorAll('.account-select') ||
+    document.querySelectorAll('.account-select');
+  selects.forEach(sel => {
     const prev = sel.value;
     sel.innerHTML = `<option value="">-- Select Account --</option>` +
       state.accounts.map(a =>
@@ -1506,7 +1530,10 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('user-otp')?.addEventListener('keydown',      e => { if(e.key==='Enter') userVerify(); });
   document.getElementById('user-2fa-pw')?.addEventListener('keydown',   e => { if(e.key==='Enter') userSign2fa(); });
 
-  document.getElementById('search-input')?.addEventListener('input', () => renderAccounts(state.accounts));
+  document.getElementById('search-input')?.addEventListener('input', () => {
+    state.accountDisplayLimit = 60;
+    renderAccounts(state.accounts);
+  });
 
   let touchStartX = 0;
   document.addEventListener('touchstart', e => { touchStartX = e.touches[0].clientX; }, { passive: true });

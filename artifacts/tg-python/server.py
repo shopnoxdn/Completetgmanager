@@ -168,6 +168,28 @@ def db_save(phone, user, has_2fa=False):
              user.username, str(user.id), int(has_2fa), now)
         )
 
+def db_save_many(records):
+    if not records:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    rows = [
+        (
+            phone,
+            user.first_name or "",
+            user.last_name,
+            user.username,
+            str(user.id),
+            int(has_2fa),
+            now,
+        )
+        for phone, user, has_2fa in records
+    ]
+    with sqlite3.connect(DB_PATH) as c:
+        c.executemany(
+            "INSERT OR REPLACE INTO accounts VALUES (?,?,?,?,?,?,?)",
+            rows,
+        )
+
 def db_delete(phone):
     with sqlite3.connect(DB_PATH) as c:
         c.execute("DELETE FROM accounts WHERE phone=?", (phone,))
@@ -888,45 +910,102 @@ async def download_selected_sessions(body: BulkPhonesBody):
 # ── Upload sessions ZIP ───────────────────────────────────────────────────────
 @app.post("/api/admin/upload-sessions")
 async def upload_sessions(file: UploadFile = File(...)):
-    content = await file.read()
-    buf = io.BytesIO(content)
     results = []
+    successful_records = []
+    # A small connection pool keeps Telegram responsive without opening
+    # hundreds of MTProto connections at once.
+    concurrency = 12
     try:
-        with zipfile.ZipFile(buf) as zf:
-            names = [n for n in zf.namelist() if n.endswith(".session") and not n.startswith("__")]
-            for name in names:
+        # Use UploadFile's spooled file directly instead of copying the whole
+        # ZIP into another bytes buffer.
+        await file.seek(0)
+        with zipfile.ZipFile(file.file) as zf:
+            session_names = {}
+            for name in zf.namelist():
+                if name.startswith("__") or not name.lower().endswith(".session"):
+                    continue
                 basename = Path(name).name
                 raw_phone = basename[:-8]  # strip .session
                 raw_digits = re.sub(r"[^0-9]", "", raw_phone)
-                if not raw_digits:
-                    continue
+                if raw_digits:
+                    # One import result per phone, even if the ZIP contains
+                    # duplicate files in nested folders.
+                    session_names[raw_digits] = name
+
+            if len(session_names) > 1000:
+                raise HTTPException(400, "ZIP contains too many session files (maximum 1000)")
+
+            sem = asyncio.Semaphore(concurrency)
+
+            async def import_one(raw_digits, name):
                 phone = "+" + raw_digits
-                sess_data = zf.read(name)
                 dest = Path(session_name(phone) + ".session")
-                dest.write_bytes(sess_data)
-                client = make_client(session_name(phone))
+                client = None
+                result = None
+                record = None
                 try:
-                    await client.connect()
-                    if not await client.is_user_authorized():
-                        dest.unlink(missing_ok=True)
-                        results.append({"phone": phone, "success": False, "error": "Session expired"})
-                        continue
-                    user = await client.get_me()
-                    has_2fa = False
-                    try:
-                        pwd = await client(GetPasswordRequest())
-                        has_2fa = getattr(pwd, "has_password", False)
-                    except: pass
-                    db_save(phone, user, has_2fa)
-                    results.append({"phone": phone, "success": True,
-                                    "name": user.first_name or phone})
+                    async with sem:
+                        dest.write_bytes(zf.read(name))
+                        client = make_client(session_name(phone))
+                        await client.connect()
+                        if not await client.is_user_authorized():
+                            result = {
+                                "phone": phone,
+                                "success": False,
+                                "error": "Session expired",
+                            }
+                        else:
+                            user = await client.get_me()
+                            if not user:
+                                result = {
+                                    "phone": phone,
+                                    "success": False,
+                                    "error": "Could not read account",
+                                }
+                            else:
+                                has_2fa = False
+                                try:
+                                    pwd = await client(GetPasswordRequest())
+                                    has_2fa = getattr(pwd, "has_password", False)
+                                except Exception:
+                                    pass
+                                result = {
+                                    "phone": phone,
+                                    "success": True,
+                                    "name": user.first_name or phone,
+                                }
+                                record = (phone, user, has_2fa)
                 except Exception as e:
-                    try: dest.unlink(missing_ok=True)
-                    except: pass
-                    results.append({"phone": phone, "success": False, "error": str(e)})
+                    result = {
+                        "phone": phone,
+                        "success": False,
+                        "error": str(e),
+                    }
                 finally:
-                    try: await client.disconnect()
-                    except: pass
+                    if client:
+                        try:
+                            await client.disconnect()
+                        except Exception:
+                            pass
+                return result, record
+
+            imported = await asyncio.gather(
+                *(import_one(raw_digits, name) for raw_digits, name in session_names.items())
+            )
+            for result, record in imported:
+                results.append(result)
+                if record:
+                    successful_records.append(record)
+                elif not result["success"]:
+                    for stale_file in glob.glob(session_name(result["phone"]) + "*"):
+                        try:
+                            os.remove(stale_file)
+                        except OSError:
+                            pass
+
+            # One transaction is substantially faster than opening SQLite once
+            # for every account in a large ZIP.
+            db_save_many(successful_records)
     except zipfile.BadZipFile:
         raise HTTPException(400, "Invalid ZIP file")
     return {"results": results}
