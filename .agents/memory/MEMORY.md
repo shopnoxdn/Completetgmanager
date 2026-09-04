@@ -1,0 +1,1 @@
+- [Imported Python app routing](python-app-routing.md) — managed web artifact commands run from the artifact directory, and stale `/api` artifacts can shadow a root app's API routes.

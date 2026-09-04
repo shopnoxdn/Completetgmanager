@@ -1,0 +1,27 @@
+kind = "web"
+previewPath = "/"
+title = "Telegram Manager"
+description = "A web-based Telegram account management dashboard for managing multiple Telegram accounts, sessions, two-factor authentication, bot referrals, messaging, and channel actions."
+version = "1.0.0"
+id = "artifacts/tg-manager"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 5000
+
+[services.development]
+run = "cd ../tg-python && python server.py"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/tg-manager", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/tg-manager/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "5000"
