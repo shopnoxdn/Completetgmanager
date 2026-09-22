@@ -190,6 +190,19 @@ def db_save_many(records):
             rows,
         )
 
+def db_save_placeholders(phones):
+    if not phones:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    rows = [(phone, "", None, None, "", 0, now) for phone in phones]
+    with sqlite3.connect(DB_PATH) as c:
+        c.executemany(
+            """INSERT OR IGNORE INTO accounts
+               (phone, first_name, last_name, username, user_id, has_2fa, logged_in_at)
+               VALUES (?,?,?,?,?,?,?)""",
+            rows,
+        )
+
 def db_delete(phone):
     with sqlite3.connect(DB_PATH) as c:
         c.execute("DELETE FROM accounts WHERE phone=?", (phone,))
@@ -210,6 +223,7 @@ def make_client(sess: str) -> TelegramClient:
 
 # ── Pending login sessions ────────────────────────────────────────────────────
 _pending: dict = {}
+_upload_jobs: dict = {}
 
 # ── App ───────────────────────────────────────────────────────────────────────
 @asynccontextmanager
@@ -908,16 +922,84 @@ async def download_selected_sessions(body: BulkPhonesBody):
     )
 
 # ── Upload sessions ZIP ───────────────────────────────────────────────────────
+async def _validate_upload_job(job_id: str, phones: list[str]):
+    job = _upload_jobs[job_id]
+    sem = asyncio.Semaphore(32)
+    successful_records = []
+
+    async def validate(phone):
+        client = None
+        result = {"phone": phone, "success": False, "error": "Validation failed"}
+        record = None
+        remove_session = False
+        try:
+            async with sem:
+                client = make_client(session_name(phone))
+                await client.connect()
+                if not await client.is_user_authorized():
+                    result["error"] = "Session expired"
+                    remove_session = True
+                else:
+                    user = await client.get_me()
+                    if not user:
+                        result["error"] = "Could not read account"
+                    else:
+                        has_2fa = False
+                        try:
+                            pwd = await client(GetPasswordRequest())
+                            has_2fa = getattr(pwd, "has_password", False)
+                        except Exception:
+                            pass
+                        result = {
+                            "phone": phone,
+                            "success": True,
+                            "name": user.first_name or phone,
+                        }
+                        record = (phone, user, has_2fa)
+        except Exception as e:
+            result["error"] = str(e)
+        finally:
+            if client:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+
+        if record:
+            successful_records.append(record)
+        elif remove_session:
+            for stale_file in glob.glob(session_name(phone) + "*"):
+                try:
+                    os.remove(stale_file)
+                except OSError:
+                    pass
+            db_delete(phone)
+
+        job["processed"] += 1
+        if result["success"]:
+            job["success"] += 1
+        else:
+            job["failed"] += 1
+        job["results_by_phone"][phone] = result
+        return result
+
+    try:
+        await asyncio.gather(*(validate(phone) for phone in phones))
+        db_save_many(successful_records)
+        job["done"] = True
+        job["results"] = [
+            job["results_by_phone"][phone]
+            for phone in phones
+            if phone in job["results_by_phone"]
+        ]
+    except Exception as e:
+        job["done"] = True
+        job["error"] = str(e)
+
+
 @app.post("/api/admin/upload-sessions")
 async def upload_sessions(file: UploadFile = File(...)):
-    results = []
-    successful_records = []
-    # A small connection pool keeps Telegram responsive without opening
-    # hundreds of MTProto connections at once.
-    concurrency = 12
     try:
-        # Use UploadFile's spooled file directly instead of copying the whole
-        # ZIP into another bytes buffer.
         await file.seek(0)
         with zipfile.ZipFile(file.file) as zf:
             session_names = {}
@@ -925,90 +1007,64 @@ async def upload_sessions(file: UploadFile = File(...)):
                 if name.startswith("__") or not name.lower().endswith(".session"):
                     continue
                 basename = Path(name).name
-                raw_phone = basename[:-8]  # strip .session
-                raw_digits = re.sub(r"[^0-9]", "", raw_phone)
+                raw_digits = re.sub(r"[^0-9]", "", basename[:-8])
                 if raw_digits:
-                    # One import result per phone, even if the ZIP contains
-                    # duplicate files in nested folders.
                     session_names[raw_digits] = name
 
-            if len(session_names) > 1000:
-                raise HTTPException(400, "ZIP contains too many session files (maximum 1000)")
+            if len(session_names) > 2500:
+                raise HTTPException(
+                    400,
+                    "ZIP contains too many session files (maximum 2500)",
+                )
 
-            sem = asyncio.Semaphore(concurrency)
-
-            async def import_one(raw_digits, name):
+            phones = []
+            for raw_digits, name in session_names.items():
                 phone = "+" + raw_digits
                 dest = Path(session_name(phone) + ".session")
-                client = None
-                result = None
-                record = None
-                try:
-                    async with sem:
-                        dest.write_bytes(zf.read(name))
-                        client = make_client(session_name(phone))
-                        await client.connect()
-                        if not await client.is_user_authorized():
-                            result = {
-                                "phone": phone,
-                                "success": False,
-                                "error": "Session expired",
-                            }
-                        else:
-                            user = await client.get_me()
-                            if not user:
-                                result = {
-                                    "phone": phone,
-                                    "success": False,
-                                    "error": "Could not read account",
-                                }
-                            else:
-                                has_2fa = False
-                                try:
-                                    pwd = await client(GetPasswordRequest())
-                                    has_2fa = getattr(pwd, "has_password", False)
-                                except Exception:
-                                    pass
-                                result = {
-                                    "phone": phone,
-                                    "success": True,
-                                    "name": user.first_name or phone,
-                                }
-                                record = (phone, user, has_2fa)
-                except Exception as e:
-                    result = {
-                        "phone": phone,
-                        "success": False,
-                        "error": str(e),
-                    }
-                finally:
-                    if client:
-                        try:
-                            await client.disconnect()
-                        except Exception:
-                            pass
-                return result, record
+                dest.write_bytes(zf.read(name))
+                phones.append(phone)
 
-            imported = await asyncio.gather(
-                *(import_one(raw_digits, name) for raw_digits, name in session_names.items())
-            )
-            for result, record in imported:
-                results.append(result)
-                if record:
-                    successful_records.append(record)
-                elif not result["success"]:
-                    for stale_file in glob.glob(session_name(result["phone"]) + "*"):
-                        try:
-                            os.remove(stale_file)
-                        except OSError:
-                            pass
-
-            # One transaction is substantially faster than opening SQLite once
-            # for every account in a large ZIP.
-            db_save_many(successful_records)
+        # Make imported phones visible immediately. Telegram metadata is
+        # verified in the background, so a 2,000-file ZIP does not block the
+        # request while 2,000 MTProto connections are opened.
+        db_save_placeholders(phones)
+        job_id = str(uuid4())
+        _upload_jobs[job_id] = {
+            "jobId": job_id,
+            "total": len(phones),
+            "processed": 0,
+            "success": 0,
+            "failed": 0,
+            "done": False,
+            "results": [],
+            "results_by_phone": {},
+        }
+        asyncio.create_task(_validate_upload_job(job_id, phones))
+        return {
+            "jobId": job_id,
+            "queued": True,
+            "total": len(phones),
+            "results": [],
+        }
     except zipfile.BadZipFile:
         raise HTTPException(400, "Invalid ZIP file")
-    return {"results": results}
+
+
+@app.get("/api/admin/upload-status/{job_id}")
+async def upload_status(job_id: str):
+    job = _upload_jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "Upload job not found")
+    return {
+        "jobId": job["jobId"],
+        "total": job["total"],
+        "processed": job["processed"],
+        "success": job["success"],
+        "failed": job["failed"],
+        "done": job["done"],
+        "error": job.get("error"),
+        "results": job["results"][:120] if job["done"] else [],
+    }
 
 # ── Static file serving ───────────────────────────────────────────────────────
 @app.get("/")

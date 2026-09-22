@@ -355,6 +355,8 @@ function navigate(page, data) {
   const [title, sub] = titles[page] || ['', ''];
   document.getElementById('topbar-title').textContent = title;
   document.getElementById('topbar-sub').textContent   = sub;
+  const accountCount = document.getElementById('topbar-account-count');
+  if (accountCount) accountCount.style.display = page === 'dashboard' ? 'inline-flex' : 'none';
 
   if (page !== 'dashboard') exitSelectMode();
   if (page === 'detail' && state.detail) loadDetail(state.detail);
@@ -470,6 +472,10 @@ function updateStats() {
   document.getElementById('stat-total').textContent  = state.accounts.length;
   document.getElementById('stat-2fa').textContent    = state.accounts.filter(a => a.has2fa).length;
   document.getElementById('stat-active').textContent = state.accounts.length;
+  const accountCount = document.getElementById('topbar-account-count');
+  if (accountCount) {
+    accountCount.textContent = `${state.accounts.length} logged in`;
+  }
   renderCountrySummary(state.accounts);
 }
 
@@ -752,13 +758,64 @@ function handleZipDrop(event) {
   if (btn) btn.disabled = false;
 }
 
+function renderUploadResults(results, title) {
+  const el = document.getElementById('upload-results');
+  if (!el) return;
+  const shown = results.slice(0, 120);
+  el.innerHTML = `
+    <div class="card">
+      <div class="card-header"><div class="card-title">${esc(title)}</div></div>
+      ${shown.length ? `<div class="result-list">${shown.map(x => `
+        <div class="result-item ${x.success ? 'ok' : 'fail'}">
+          <span style="color:${x.success ? 'var(--success)' : 'var(--danger)'};font-weight:800">${x.success ? '✓' : '✕'}</span>
+          <span style="font-family:var(--mono);font-size:11px">${esc(x.phone)}</span>
+          ${x.name ? `<span class="badge badge-dim" style="margin-left:auto">${esc(x.name)}</span>` : ''}
+          ${x.error ? `<span style="color:var(--text-dim);margin-left:auto;font-size:10px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(x.error)}</span>` : ''}
+        </div>`).join('')}</div>` : '<div class="text-dim text-sm">Verification is running in the background.</div>'}
+    </div>
+    ${results.length > 120 ? `<div class="text-dim text-sm" style="padding:10px 0">Showing the first 120 of ${results.length} results.</div>` : ''}`;
+}
+
+async function pollUploadStatus(jobId) {
+  const progress = document.getElementById('upload-progress');
+  try {
+    const status = await get(`/admin/upload-status/${encodeURIComponent(jobId)}`);
+    if (!status.done) {
+      if (progress) {
+        progress.textContent = `Verifying sessions: ${status.processed}/${status.total}…`;
+        progress.style.display = 'block';
+      }
+      setTimeout(() => pollUploadStatus(jobId), 1000);
+      return;
+    }
+    if (progress) {
+      progress.textContent = status.error
+        ? `Verification stopped: ${status.error}`
+        : `Verification complete: ${status.success} logged in, ${status.failed} failed`;
+      progress.style.display = 'block';
+    }
+    renderUploadResults(
+      status.results || [],
+      status.error
+        ? `Upload finished with an error`
+        : `Result: ${status.success} logged in${status.failed ? `, ${status.failed} failed` : ''}`,
+    );
+    loadAccounts();
+    setTimeout(() => {
+      if (progress) progress.style.display = 'none';
+    }, 6000);
+  } catch (e) {
+    if (progress) progress.textContent = 'Could not read upload progress. Refresh to check accounts.';
+  }
+}
+
 async function uploadSessions() {
   if (!state.pendingZipFile) return toast('আগে ZIP ফাইল select করুন', 'warn');
   const btn = document.getElementById('btn-upload-sessions');
   setLoading(btn, true);
   const progress = document.getElementById('upload-progress');
   if (progress) {
-    progress.textContent = 'Importing sessions in parallel… please keep this page open.';
+    progress.textContent = 'Uploading and queueing sessions…';
     progress.style.display = 'block';
   }
   const formData = new FormData();
@@ -767,36 +824,26 @@ async function uploadSessions() {
     const resp = await fetch(`${API}/admin/upload-sessions`, { method: 'POST', body: formData });
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
-    const results = data.results || [];
-    const ok   = results.filter(x => x.success).length;
-    const fail = results.length - ok;
-    const el = document.getElementById('upload-results');
-    if (el) {
-      el.innerHTML = `
-        <div class="card">
-          <div class="card-header">
-            <div class="card-title">Result: ${ok} logged in${fail ? ', ' + fail + ' failed' : ''}</div>
-          </div>
-          <div class="result-list">
-            ${results.slice(0, 120).map(x => `
-              <div class="result-item ${x.success ? 'ok' : 'fail'}">
-                <span style="color:${x.success?'var(--success)':'var(--danger)'};font-weight:800">${x.success?'✓':'✕'}</span>
-                <span style="font-family:var(--mono);font-size:11px">${esc(x.phone)}</span>
-                ${x.name ? `<span class="badge badge-dim" style="margin-left:auto">${esc(x.name)}</span>` : ''}
-                ${x.error ? `<span style="color:var(--text-dim);margin-left:auto;font-size:10px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(x.error)}</span>` : ''}
-              </div>`).join('')}
-          </div>
-            </div>
-            ${results.length > 120 ? `<div class="text-dim text-sm" style="padding:10px 0">Showing the first 120 of ${results.length} results.</div>` : ''}`;
-    }
-    toast(`${ok} নাম্বার imported${fail ? ', ' + fail + ' failed' : ''}`, fail && !ok ? 'error' : ok ? 'success' : 'warn');
     state.pendingZipFile = null;
     const zoneText = document.getElementById('upload-zone-text');
     if (zoneText) zoneText.textContent = 'Click or drag ZIP file here';
     document.getElementById('session-zip-input').value = '';
     if (btn) btn.disabled = true;
-    if (progress) progress.style.display = 'none';
-    if (ok > 0) loadAccounts();
+
+    if (data.queued && data.jobId) {
+      renderUploadResults([], `Queued ${data.total} sessions — verifying in background`);
+      toast(`${data.total} sessions queued for fast import`, 'success');
+      loadAccounts();
+      pollUploadStatus(data.jobId);
+    } else {
+      const results = data.results || [];
+      const ok = results.filter(x => x.success).length;
+      const fail = results.length - ok;
+      renderUploadResults(results, `Result: ${ok} logged in${fail ? `, ${fail} failed` : ''}`);
+      toast(`${ok} নাম্বার imported${fail ? ', ' + fail + ' failed' : ''}`, fail && !ok ? 'error' : ok ? 'success' : 'warn');
+      if (progress) progress.style.display = 'none';
+      if (ok > 0) loadAccounts();
+    }
   } catch (e) {
     toast('Error: ' + e.message, 'error');
     if (progress) progress.style.display = 'none';
