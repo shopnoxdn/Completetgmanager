@@ -425,9 +425,14 @@ async function dismissFailedLogout(phone) {
 async function loadAccounts() {
   try {
     const accounts = await get('/telegram/accounts');
-    state.accounts = accounts || [];
-    renderAccounts(state.accounts);
+    state.accounts = Array.isArray(accounts) ? accounts : [];
+    const accountPhones = new Set(state.accounts.map(accountPhone).filter(Boolean));
+    state.selectedPhones = new Set(
+      [...state.selectedPhones].filter(phone => accountPhones.has(phone)),
+    );
     updateStats();
+    renderAccounts(state.accounts);
+    updateBulkBar();
     if (['botrefer', 'sessiondl', 'more', 'sendmsg', 'joinchannel'].includes(state.currentPage)) {
       populateAccountSelects();
     }
@@ -469,12 +474,13 @@ function updateMoreAllCount() {
 }
 
 function updateStats() {
-  document.getElementById('stat-total').textContent  = state.accounts.length;
+  const total = state.accounts.length;
+  document.getElementById('stat-total').textContent  = total;
   document.getElementById('stat-2fa').textContent    = state.accounts.filter(a => a.has2fa).length;
-  document.getElementById('stat-active').textContent = state.accounts.length;
+  document.getElementById('stat-active').textContent = total;
   const accountCount = document.getElementById('topbar-account-count');
   if (accountCount) {
-    accountCount.textContent = `${state.accounts.length} logged in`;
+    accountCount.textContent = `${total} logged in`;
   }
   renderCountrySummary(state.accounts);
 }
@@ -519,18 +525,25 @@ function renderCountrySummary(accounts) {
   });
 }
 
+function accountPhone(account) {
+  return String(account?.phone || '');
+}
+
+function accountMatchesSearch(account, query) {
+  const q = query.toLowerCase();
+  const phone = accountPhone(account).toLowerCase();
+  const country = getCountryInfo(phone);
+  return phone.includes(q) ||
+    country.name.toLowerCase().includes(q) ||
+    country.prefix.includes(q.replace(/^\+/, '')) ||
+    String(account?.username || '').toLowerCase().includes(q) ||
+    String(account?.firstName || '').toLowerCase().includes(q);
+}
+
 function renderAccounts(accounts) {
   const container = document.getElementById('accounts-grid');
   const q = (document.getElementById('search-input')?.value || '').toLowerCase();
-  const filtered = accounts.filter(a => {
-    const country = getCountryInfo(a.phone);
-    const phone = String(a.phone || '');
-    return phone.toLowerCase().includes(q) ||
-      country.name.toLowerCase().includes(q) ||
-      country.prefix.includes(q.replace(/^\+/, '')) ||
-      (a.username  || '').toLowerCase().includes(q) ||
-      (a.firstName || '').toLowerCase().includes(q);
-  });
+  const filtered = accounts.filter(a => accountMatchesSearch(a, q));
 
   if (!filtered.length) {
     container.innerHTML = `
@@ -548,11 +561,12 @@ function renderAccounts(accounts) {
     const initials = ((a.firstName||'?')[0] + (a.lastName ? a.lastName[0] : '')).toUpperCase();
     const loginDuration = formatLoginDuration(a.loggedInAt);
     const serialNum = accounts.indexOf(a) + 1;
-    const isSelected = state.selectedPhones.has(a.phone);
+    const phone = accountPhone(a);
+    const isSelected = state.selectedPhones.has(phone);
     const country = getCountryInfo(a.phone);
     const clickFn = state.selectMode
-      ? `toggleSelectPhone('${esc(a.phone)}')`
-      : `navigate('detail','${esc(a.phone)}')`;
+      ? `toggleSelectPhone('${esc(phone)}')`
+      : `navigate('detail','${esc(phone)}')`;
     return `
       <div class="account-card${isSelected ? ' card-selected' : ''}" onclick="${clickFn}" style="${state.selectMode ? 'cursor:pointer' : ''}">
         <div class="flex items-center gap-3">
@@ -566,7 +580,7 @@ function renderAccounts(accounts) {
           </div>
           <div class="account-info">
             <div class="account-name">${esc(a.firstName)} ${esc(a.lastName||'')}</div>
-            <div class="account-phone">${esc(a.phone)}</div>
+            <div class="account-phone">${esc(phone)}</div>
             <div class="account-badges mt-1">
               <span class="badge badge-country">${country.flag} ${esc(country.name)}</span>
               ${a.username ? `<span class="badge badge-blue">@${esc(a.username)}</span>` : ''}
@@ -617,6 +631,8 @@ function exitSelectMode() {
 }
 
 function toggleSelectPhone(phone) {
+  phone = String(phone || '');
+  if (!phone) return;
   if (state.selectedPhones.has(phone)) {
     state.selectedPhones.delete(phone);
   } else {
@@ -642,8 +658,10 @@ function updateBulkBar() {
 function bulkSelectAll() {
   const q = (document.getElementById('search-input')?.value || '').toLowerCase();
   state.accounts
-    .filter(a => a.phone.includes(q) || (a.username||'').toLowerCase().includes(q) || (a.firstName||'').toLowerCase().includes(q))
-    .forEach(a => state.selectedPhones.add(a.phone));
+    .filter(a => accountMatchesSearch(a, q))
+    .map(accountPhone)
+    .filter(Boolean)
+    .forEach(phone => state.selectedPhones.add(phone));
   updateBulkBar();
   renderAccounts(state.accounts);
 }
