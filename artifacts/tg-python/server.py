@@ -28,6 +28,26 @@ from telethon.tl.types import (
     EmailVerificationCode,
 )
 
+def load_local_environment(env_path=None, environ=None):
+    env_path = Path(env_path) if env_path else Path(__file__).parent / ".env"
+    if not env_path.exists():
+        return
+    environ = os.environ if environ is None else environ
+    for line in env_path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if key not in {"ADMIN_PASSWORD", "SESSION_SECRET"} or key in environ:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        environ[key] = value
+
+load_local_environment()
+
 API_ID   = 32140582
 API_HASH = "e9597b6e5e64a9d093071e20d0545f3f"
 DEFAULT_2FA_PASSWORD = "4735908767"

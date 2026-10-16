@@ -249,6 +249,12 @@ async function gateLogin() {
   const u = (document.getElementById('gate-username').value || '').trim();
   if (!u) return toast('Please enter a username', 'warn');
   const isAdmin = u.toLowerCase() === ADMIN_USERNAME.toLowerCase();
+  const passwordGroup = document.getElementById('gate-password-group');
+  if (isAdmin && passwordGroup?.style.display === 'none') {
+    updateGatePasswordVisibility();
+    document.getElementById('gate-password')?.focus();
+    return toast('Enter the admin password, then press Continue again', 'warn');
+  }
   const password = document.getElementById('gate-password')?.value || '';
   if (isAdmin && !password) return toast('Please enter the admin password', 'warn');
   const btn = document.getElementById('gate-btn');
@@ -273,11 +279,10 @@ function updateGatePasswordVisibility() {
   const username = (document.getElementById('gate-username')?.value || '').trim();
   const isAdmin = username.toLowerCase() === ADMIN_USERNAME.toLowerCase();
   const group = document.getElementById('gate-password-group');
+  const wasHidden = group?.style.display === 'none';
   if (group) group.style.display = isAdmin ? '' : 'none';
-  if (!isAdmin) {
-    const password = document.getElementById('gate-password');
-    if (password) password.value = '';
-  }
+  const password = document.getElementById('gate-password');
+  if (password && (!isAdmin || wasHidden)) password.value = '';
 }
 
 function applyRole() {
@@ -1055,44 +1060,76 @@ function toggleAssignNumbers() {
   const panel = document.getElementById('assign-numbers-panel');
   const opening = panel.style.display === 'none';
   panel.style.display = opening ? 'block' : 'none';
-  if (opening) renderAssignableCountries();
+  if (opening) {
+    const search = document.getElementById('assign-number-search');
+    if (search) search.value = '';
+    renderAssignableCountries();
+  }
+}
+
+function getAssignableAccounts(username = state.selectedAdminUser) {
+  const currentUser = state.allUsers.find(user => user.username === username);
+  const alreadyAssigned = new Set(currentUser?.assigned_numbers || []);
+  const assignedToOtherUsers = new Set(
+    state.allUsers
+      .filter(user => user.username !== username)
+      .flatMap(user => user.assigned_numbers || []),
+  );
+  return state.accounts.filter(account => {
+    const phone = String(account.phone || '');
+    return phone && !alreadyAssigned.has(phone) && !assignedToOtherUsers.has(phone);
+  });
 }
 
 function renderAssignableCountries() {
   const select = document.getElementById('assign-country-select');
   if (!select) return;
+  const previousCountry = select.value;
   const countries = new Map();
-  state.accounts.forEach(account => {
+  getAssignableAccounts().forEach(account => {
     const info = getCountryInfo(account.phone);
-    countries.set(info.name, info);
+    const country = countries.get(info.name) || { ...info, count: 0 };
+    country.count += 1;
+    countries.set(info.name, country);
   });
   const options = [...countries.values()].sort((a, b) => a.name.localeCompare(b.name));
+  select.disabled = options.length === 0;
   select.innerHTML = options.length
-    ? options.map(country => `<option value="${esc(country.name)}">${country.flag} ${esc(country.name)}</option>`).join('')
+    ? options.map(country => `<option value="${esc(country.name)}">${country.flag} ${esc(country.name)} — ${country.count} numbers</option>`).join('')
     : '<option value="">No account numbers available</option>';
+  if (options.some(country => country.name === previousCountry)) {
+    select.value = previousCountry;
+  }
   renderAssignableNumbers();
 }
 
 function renderAssignableNumbers() {
   const container = document.getElementById('assign-number-options');
   const countrySelect = document.getElementById('assign-country-select');
+  const searchInput = document.getElementById('assign-number-search');
+  const countLabel = document.getElementById('assign-number-count');
   const username = state.selectedAdminUser;
   if (!container || !countrySelect || !username) return;
-  const currentUser = state.allUsers.find(user => user.username === username);
-  const assignedToOtherUsers = new Set(
-    state.allUsers
-      .filter(user => user.username !== username)
-      .flatMap(user => user.assigned_numbers || []),
-  );
-  const alreadyAssigned = new Set(currentUser?.assigned_numbers || []);
-  const candidates = state.accounts.filter(account => {
+  const countryCandidates = getAssignableAccounts(username)
+    .filter(account => getCountryInfo(account.phone).name === countrySelect.value);
+  const query = String(searchInput?.value || '').trim().toLowerCase();
+  const queryDigits = normalizePhone(query);
+  const candidates = countryCandidates.filter(account => {
+    if (!query) return true;
     const phone = String(account.phone || '');
-    return getCountryInfo(phone).name === countrySelect.value &&
-      !alreadyAssigned.has(phone) &&
-      !assignedToOtherUsers.has(phone);
+    const digits = normalizePhone(phone);
+    return phone.toLowerCase().includes(query) || (queryDigits && digits.includes(queryDigits));
   });
+  if (countLabel) {
+    countLabel.textContent = query
+      ? `${candidates.length}টি মিলেছে · ${countryCandidates.length}টি available`
+      : `${countryCandidates.length}টি number available`;
+  }
   if (!candidates.length) {
-    container.innerHTML = '<div class="empty-state" style="padding:12px"><p>এই দেশের কোনো unassigned account number নেই।</p></div>';
+    const message = countryCandidates.length
+      ? 'Search-এর সঙ্গে মেলে এমন number নেই।'
+      : 'এই country-তে কোনো unassigned account number নেই।';
+    container.innerHTML = `<div class="empty-state" style="padding:12px"><p>${message}</p></div>`;
     return;
   }
   container.innerHTML = candidates.map(account => `
@@ -1839,7 +1876,12 @@ function setLoading(btn, on) {
 
 /* ══════════ INIT ══════════ */
 document.addEventListener('DOMContentLoaded', () => {
-  document.getElementById('gate-username')?.addEventListener('keydown', e => { if(e.key==='Enter') gateLogin(); });
+  const gateUsername = document.getElementById('gate-username');
+  gateUsername?.addEventListener('input', updateGatePasswordVisibility);
+  gateUsername?.addEventListener('change', updateGatePasswordVisibility);
+  gateUsername?.addEventListener('keyup', updateGatePasswordVisibility);
+  gateUsername?.addEventListener('keydown', e => { if(e.key==='Enter') gateLogin(); });
+  updateGatePasswordVisibility();
   document.getElementById('gate-password')?.addEventListener('keydown', e => { if(e.key==='Enter') gateLogin(); });
   document.getElementById('new-user-username')?.addEventListener('keydown', e => { if(e.key==='Enter') adminCreateUser(); });
   document.getElementById('login-phone')?.addEventListener('keydown',   e => { if(e.key==='Enter') sendCode(); });

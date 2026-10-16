@@ -21,7 +21,7 @@
     <p class="gate-sub">Enter your username to continue</p>
     <div class="input-group">
       <label class="input-label">Username</label>
-      <input class="input" id="gate-username" type="text" placeholder="Enter username..." autocomplete="username" autocapitalize="none" oninput="updateGatePasswordVisibility()"/>
+      <input class="input" id="gate-username" type="text" placeholder="Enter username..." autocomplete="username" autocapitalize="none"/>
     </div>
     <div class="input-group" id="gate-password-group" style="display:none">
       <label class="input-label" for="gate-password">Admin Password</label>
@@ -258,6 +258,11 @@
                 <label class="input-label" for="assign-country-select">Country</label>
                 <select class="input" id="assign-country-select" onchange="renderAssignableNumbers()"></select>
               </div>
+              <div class="input-group assign-search-group">
+                <label class="input-label" for="assign-number-search">Search number</label>
+                <input class="input" id="assign-number-search" type="search" inputmode="tel" placeholder="Type a phone number..." autocomplete="off" oninput="renderAssignableNumbers()"/>
+              </div>
+              <div class="assign-number-count" id="assign-number-count" aria-live="polite"></div>
               <div id="assign-number-options" class="assign-number-options"></div>
               <button class="btn btn-primary btn-full mt-3" id="btn-assign-selected" onclick="assignSelectedNumbers()">Assign Selected Numbers</button>
             </div>
@@ -694,6 +699,6 @@
   </div>
 </div>
 
-<script src="/script.js"></script>
+<script src="/script.js?v=admin-login-2"></script>
 </body>
 </html>

@@ -3,5 +3,12 @@
     "sold_numbers": [],
     "assigned_numbers": [],
     "total_logins": 0
+  },
+  "@taitan_fegoue_01": {
+    "sold_numbers": [],
+    "assigned_numbers": [
+      "+8801780749913"
+    ],
+    "total_logins": 0
   }
 }
