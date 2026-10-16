@@ -3,8 +3,8 @@ name: User assignment access model
 description: Product decision for identity handling in the assigned Telegram account workflow.
 ---
 
-For the assigned-number workflow, retain the existing username-only login unless the user changes this decision. Be explicit that username-only login does not authenticate identity or provide secure separation between users.
+Admin sign-in must require a password. End-user sign-in remains username-only unless the user changes this decision. The server should enforce the admin role and assigned-number checks using a signed session, but username-only end-user identities do not provide secure separation.
 
-**Why:** The user chose to keep username-only login after being told another person can claim a username and access account tools.
+**Why:** The user chose username-only sign-in for end users after being told another person can claim a username, and separately requested a password for the admin.
 
-**How to apply:** Do not claim assignments are protected from other users. If production-safe user isolation is requested later, first add verifiable identities and server-side authorization for Telegram account operations.
+**How to apply:** Keep the admin password in Replit Secrets, never source code. Do not claim assigned numbers are protected from another person using the same username; production-safe user isolation requires verifiable end-user identities.

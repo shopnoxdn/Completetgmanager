@@ -1,11 +1,12 @@
 import os, re, glob, shutil, sqlite3, asyncio, json, io, zipfile, tempfile
+import base64, hashlib, hmac, time
 from uuid import uuid4
 from pathlib import Path
 from typing import Optional, List
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 import uvicorn
@@ -100,6 +101,17 @@ def load_users() -> dict:
 
 def save_users(data: dict):
     USERS_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+
+def user_ensure(username: str) -> bool:
+    username = str(username or "").strip()
+    if not username or username.lower() == ADMIN_USERNAME.lower():
+        return False
+    data = load_users()
+    if username in data:
+        return False
+    data[username] = {"sold_numbers": [], "assigned_numbers": [], "total_logins": 0}
+    save_users(data)
+    return True
 
 def user_record_sale(username: str, phone: str):
     data = load_users()
@@ -275,6 +287,74 @@ async def lifespan(app):
         except: pass
 
 app = FastAPI(lifespan=lifespan)
+SESSION_COOKIE = "tg_manager_session"
+SESSION_MAX_AGE = 12 * 60 * 60
+
+def create_session_token(username: str, role: str) -> str:
+    secret = os.getenv("SESSION_SECRET")
+    if not secret:
+        raise HTTPException(503, "Server session secret is not configured")
+    payload = json.dumps(
+        {"username": username, "role": role, "expires": int(time.time()) + SESSION_MAX_AGE},
+        separators=(",", ":"),
+    ).encode()
+    encoded = base64.urlsafe_b64encode(payload).decode().rstrip("=")
+    signature = hmac.new(secret.encode(), encoded.encode(), hashlib.sha256).hexdigest()
+    return f"{encoded}.{signature}"
+
+def read_session_token(token: Optional[str]) -> Optional[dict]:
+    if not token:
+        return None
+    secret = os.getenv("SESSION_SECRET")
+    if not secret:
+        return None
+    try:
+        encoded, signature = token.rsplit(".", 1)
+        expected = hmac.new(secret.encode(), encoded.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(signature, expected):
+            return None
+        payload_bytes = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+        payload = json.loads(payload_bytes)
+        if payload.get("expires", 0) < int(time.time()):
+            return None
+        if payload.get("role") not in ("admin", "user") or not payload.get("username"):
+            return None
+        return payload
+    except (ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+@app.middleware("http")
+async def enforce_api_session(request: Request, call_next):
+    path = request.url.path
+    public_paths = {"/api/healthz", "/api/auth/login", "/api/auth/session", "/api/auth/logout"}
+    if not path.startswith("/api/") or path in public_paths:
+        return await call_next(request)
+
+    session = read_session_token(request.cookies.get(SESSION_COOKIE))
+    if not session:
+        return JSONResponse(status_code=401, content={"detail": "Please log in"})
+
+    admin_only = (
+        path.startswith("/api/admin/") or
+        path == "/api/telegram/accounts" or
+        path in {"/api/telegram/start-bot-all", "/api/telegram/join-all"}
+    )
+    if admin_only and session["role"] != "admin":
+        return JSONResponse(status_code=403, content={"detail": "Admin access required"})
+
+    if path.startswith("/api/telegram/accounts/") and session["role"] != "admin":
+        from urllib.parse import unquote
+        phone = unquote(path[len("/api/telegram/accounts/"):].split("/", 1)[0])
+        assigned = user_get_stats(session["username"])["assigned_numbers"]
+        if phone not in assigned:
+            return JSONResponse(status_code=403, content={"detail": "This account is not assigned to your user"})
+
+    if path.startswith("/api/user/") and path != "/api/user/record-sale":
+        username = path[len("/api/user/"):].split("/", 1)[0]
+        if session["role"] != "admin" and username != session["username"]:
+            return JSONResponse(status_code=403, content={"detail": "Cannot access another user's data"})
+
+    return await call_next(request)
 
 # ── Request models ────────────────────────────────────────────────────────────
 class SendCodeBody(BaseModel):
@@ -323,6 +403,10 @@ class AssignNumbersBody(BaseModel):
 
 class AuthLoginBody(BaseModel):
     username: str
+    password: Optional[str] = None
+
+class CreateUserBody(BaseModel):
+    username: str
 
 class StartBotBody(BaseModel):
     bot_link: str
@@ -339,12 +423,41 @@ class BulkDisable2faBody(BaseModel):
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 @app.post("/api/auth/login")
-async def auth_login(body: AuthLoginBody):
+async def auth_login(body: AuthLoginBody, response: Response):
     u = body.username.strip()
     if not u:
         raise HTTPException(400, "Username required")
     role = "admin" if u.lower() == ADMIN_USERNAME.lower() else "user"
+    if role == "admin":
+        expected_password = os.getenv("ADMIN_PASSWORD")
+        if not expected_password:
+            raise HTTPException(503, "Admin password is not configured")
+        if not body.password or not hmac.compare_digest(body.password, expected_password):
+            raise HTTPException(401, "Invalid username or password")
+    else:
+        user_ensure(u)
+    response.set_cookie(
+        key=SESSION_COOKIE,
+        value=create_session_token(u, role),
+        max_age=SESSION_MAX_AGE,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        path="/",
+    )
     return {"username": u, "role": role}
+
+@app.get("/api/auth/session")
+async def auth_session(request: Request):
+    session = read_session_token(request.cookies.get(SESSION_COOKIE))
+    if not session:
+        raise HTTPException(401, "Please log in")
+    return {"username": session["username"], "role": session["role"]}
+
+@app.post("/api/auth/logout")
+async def auth_logout(response: Response):
+    response.delete_cookie(SESSION_COOKIE, path="/", httponly=True, secure=True, samesite="lax")
+    return {"success": True}
 
 # ── Healthcheck ───────────────────────────────────────────────────────────────
 @app.get("/api/healthz")
@@ -444,9 +557,12 @@ async def sign_in(body: SignInBody):
 
 # ── Record sale + trigger auto-2FA + terminate all other sessions ─────────────
 @app.post("/api/user/record-sale")
-async def record_sale(body: RecordSaleBody):
+async def record_sale(body: RecordSaleBody, request: Request):
     if body.username.lower() == ADMIN_USERNAME.lower():
         raise HTTPException(403, "Admin cannot sell numbers")
+    session = read_session_token(request.cookies.get(SESSION_COOKIE))
+    if not session or session["role"] != "user" or session["username"] != body.username:
+        raise HTTPException(403, "Cannot record a sale for another user")
     user_record_sale(body.username, body.phone)
 
     async def _post_sale():
@@ -518,6 +634,19 @@ async def admin_users():
         })
     result.sort(key=lambda x: x["sold_count"], reverse=True)
     return result
+
+@app.post("/api/admin/users")
+async def admin_create_user(body: CreateUserBody):
+    username = body.username.strip()
+    if not username:
+        raise HTTPException(400, "Username required")
+    if username.lower() == ADMIN_USERNAME.lower():
+        raise HTTPException(400, "That username is reserved for the admin")
+    if len(username) > 64:
+        raise HTTPException(400, "Username must be 64 characters or fewer")
+    if not user_ensure(username):
+        raise HTTPException(409, "User already exists")
+    return {"success": True, "username": username}
 
 @app.post("/api/admin/users/{username}/assigned-numbers")
 async def assign_user_numbers(username: str, body: AssignNumbersBody):

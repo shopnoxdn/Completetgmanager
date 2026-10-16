@@ -21,7 +21,11 @@
     <p class="gate-sub">Enter your username to continue</p>
     <div class="input-group">
       <label class="input-label">Username</label>
-      <input class="input" id="gate-username" type="text" placeholder="Enter username..." autocomplete="username" autocapitalize="none"/>
+      <input class="input" id="gate-username" type="text" placeholder="Enter username..." autocomplete="username" autocapitalize="none" oninput="updateGatePasswordVisibility()"/>
+    </div>
+    <div class="input-group" id="gate-password-group" style="display:none">
+      <label class="input-label" for="gate-password">Admin Password</label>
+      <input class="input" id="gate-password" type="password" placeholder="Enter admin password..." autocomplete="current-password"/>
     </div>
     <button class="btn btn-primary btn-full btn-lg" id="gate-btn" onclick="gateLogin()">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h4a2 2 0 012 2v14a2 2 0 01-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>
@@ -206,16 +210,30 @@
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/></svg>
                 User Sell
               </div>
-              <button class="btn btn-secondary btn-sm" onclick="loadAdminUsers()">
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
-                Refresh
-              </button>
+              <div class="flex gap-2">
+                <button class="btn btn-primary btn-sm" type="button" onclick="toggleCreateUser()">Add User</button>
+                <button class="btn btn-secondary btn-sm" onclick="loadAdminUsers()">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
+                  Refresh
+                </button>
+              </div>
               <div id="upload-progress" class="text-dim text-sm" style="display:none;text-align:center;margin-top:10px"></div>
             </div>
             <!-- Search -->
             <div class="search-bar" style="margin-bottom:12px">
               <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
               <input class="input" id="user-search-input" type="search" placeholder="Search by username..." oninput="filterUsers()"/>
+            </div>
+            <div class="card" id="create-user-panel" style="display:none;margin-bottom:12px;background:var(--bg3)">
+              <div class="card-header">
+                <div class="card-title">Add User to User Sell</div>
+                <button class="btn btn-secondary btn-sm" type="button" onclick="toggleCreateUser()">Close</button>
+              </div>
+              <div class="input-group mb-0">
+                <label class="input-label" for="new-user-username">Username</label>
+                <input class="input" id="new-user-username" type="text" maxlength="64" placeholder="Enter user's username..." autocomplete="off"/>
+              </div>
+              <button class="btn btn-primary btn-full mt-3" id="btn-create-user" type="button" onclick="adminCreateUser()">Add User</button>
             </div>
             <div id="admin-users-list">
               <div class="empty-state"><p>Loading...</p></div>

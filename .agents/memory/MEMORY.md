@@ -1,2 +1,2 @@
 - [Imported Python app routing](python-app-routing.md) — managed web artifact commands run from the artifact directory, and stale `/api` artifacts can shadow a root app's API routes.
-- [User assignment access model](user-assignment-access.md) — the assigned-number workflow retains username-only login; never describe it as secure user isolation.
+- [User assignment access model](user-assignment-access.md) — admin login is password-gated, but end-user usernames remain self-asserted and are not secure isolation.

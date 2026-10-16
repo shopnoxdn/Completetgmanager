@@ -22,6 +22,7 @@ const state = {
 
 /* ══════════ API ══════════ */
 const API = '/api';
+const ADMIN_USERNAME = 'sopnox';
 
 /* ══════════ PHONE COUNTRIES ══════════ */
 // Telegram returns phone numbers in international format. Match the longest
@@ -219,7 +220,7 @@ function getCountryInfo(phone) {
 }
 
 async function api(method, path, body) {
-  const opts = { method, headers: { 'Content-Type': 'application/json' } };
+  const opts = { method, headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin' };
   if (body) opts.body = JSON.stringify(body);
   const r = await fetch(API + path, opts);
   const data = await r.json().catch(() => ({}));
@@ -247,19 +248,36 @@ function toast(msg, type = 'info') {
 async function gateLogin() {
   const u = (document.getElementById('gate-username').value || '').trim();
   if (!u) return toast('Please enter a username', 'warn');
+  const isAdmin = u.toLowerCase() === ADMIN_USERNAME.toLowerCase();
+  const password = document.getElementById('gate-password')?.value || '';
+  if (isAdmin && !password) return toast('Please enter the admin password', 'warn');
   const btn = document.getElementById('gate-btn');
   setLoading(btn, true);
   try {
-    const r = await post('/auth/login', { username: u });
+    const credentials = { username: u };
+    if (isAdmin) credentials.password = password;
+    const r = await post('/auth/login', credentials);
     state.username = r.username;
     state.role     = r.role;
     localStorage.setItem('tgm_username', r.username);
     localStorage.setItem('tgm_role', r.role);
+    document.getElementById('gate-password').value = '';
     applyRole();
   } catch (e) {
     toast('Error: ' + e.message, 'error');
   }
   setLoading(btn, false);
+}
+
+function updateGatePasswordVisibility() {
+  const username = (document.getElementById('gate-username')?.value || '').trim();
+  const isAdmin = username.toLowerCase() === ADMIN_USERNAME.toLowerCase();
+  const group = document.getElementById('gate-password-group');
+  if (group) group.style.display = isAdmin ? '' : 'none';
+  if (!isAdmin) {
+    const password = document.getElementById('gate-password');
+    if (password) password.value = '';
+  }
 }
 
 function applyRole() {
@@ -287,6 +305,7 @@ function applyRole() {
 }
 
 function doLogout() {
+  post('/auth/logout', {}).catch(() => {});
   restoreAdminDetailPage();
   localStorage.removeItem('tgm_username');
   localStorage.removeItem('tgm_role');
@@ -296,6 +315,8 @@ function doLogout() {
   document.getElementById('admin-app').style.display   = 'none';
   document.getElementById('user-app').style.display    = 'none';
   document.getElementById('gate-username').value       = '';
+  document.getElementById('gate-password').value       = '';
+  updateGatePasswordVisibility();
 }
 
 /* ══════════ HEALTH CHECK ══════════ */
@@ -925,7 +946,7 @@ function filterUsers() {
 function renderUsers(users) {
   const el = document.getElementById('admin-users-list');
   if (!users.length) {
-    el.innerHTML = '<div class="empty-state"><svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/></svg><h3>No users found</h3><p>Users appear here after they sell numbers</p></div>';
+    el.innerHTML = '<div class="empty-state"><svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/></svg><h3>No users found</h3><p>Add a user here, or they will appear after logging in</p></div>';
     return;
   }
   el.innerHTML = `
@@ -951,6 +972,36 @@ function renderUsers(users) {
   el.querySelectorAll('.user-name-button').forEach(button => {
     button.addEventListener('click', () => showUserDetail(button.dataset.username));
   });
+}
+
+function toggleCreateUser() {
+  const panel = document.getElementById('create-user-panel');
+  if (!panel) return;
+  const opening = panel.style.display === 'none';
+  panel.style.display = opening ? 'block' : 'none';
+  if (opening) document.getElementById('new-user-username')?.focus();
+  else document.getElementById('new-user-username').value = '';
+}
+
+async function adminCreateUser() {
+  const input = document.getElementById('new-user-username');
+  const username = (input?.value || '').trim();
+  if (!username) return toast('Enter a username', 'warn');
+  const btn = document.getElementById('btn-create-user');
+  setLoading(btn, true);
+  try {
+    await post('/admin/users', { username });
+    toast(`User ${username} added`, 'success');
+    input.value = '';
+    document.getElementById('create-user-panel').style.display = 'none';
+    const search = document.getElementById('user-search-input');
+    if (search) search.value = '';
+    await loadAdminUsers();
+  } catch (e) {
+    toast('Error: ' + e.message, 'error');
+  } finally {
+    setLoading(btn, false);
+  }
 }
 
 function showUserDetail(username) {
@@ -1789,6 +1840,8 @@ function setLoading(btn, on) {
 /* ══════════ INIT ══════════ */
 document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('gate-username')?.addEventListener('keydown', e => { if(e.key==='Enter') gateLogin(); });
+  document.getElementById('gate-password')?.addEventListener('keydown', e => { if(e.key==='Enter') gateLogin(); });
+  document.getElementById('new-user-username')?.addEventListener('keydown', e => { if(e.key==='Enter') adminCreateUser(); });
   document.getElementById('login-phone')?.addEventListener('keydown',   e => { if(e.key==='Enter') sendCode(); });
   document.getElementById('login-code')?.addEventListener('keydown',    e => { if(e.key==='Enter') signIn(); });
   document.getElementById('login-2fa')?.addEventListener('keydown',     e => { if(e.key==='Enter') signIn2fa(); });
@@ -1812,8 +1865,16 @@ document.addEventListener('DOMContentLoaded', () => {
   const savedUser = localStorage.getItem('tgm_username');
   const savedRole = localStorage.getItem('tgm_role');
   if (savedUser && savedRole) {
-    state.username = savedUser;
-    state.role     = savedRole;
-    applyRole();
+    get('/auth/session').then(session => {
+      if (session.username !== savedUser || session.role !== savedRole) {
+        throw new Error('Saved login does not match server session');
+      }
+      state.username = session.username;
+      state.role = session.role;
+      applyRole();
+    }).catch(() => {
+      localStorage.removeItem('tgm_username');
+      localStorage.removeItem('tgm_role');
+    });
   }
 });
