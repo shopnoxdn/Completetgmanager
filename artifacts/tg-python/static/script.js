@@ -2,6 +2,9 @@
 const state = {
   accounts: [],
   allUsers: [],
+  userAssignedAccounts: [],
+  selectedAdminUser: null,
+  adminDetailPlaceholder: null,
   currentPage: 'dashboard',
   detail: null,
   loginStep: 1,
@@ -260,10 +263,12 @@ async function gateLogin() {
 }
 
 function applyRole() {
+  if (state.role === 'admin') restoreAdminDetailPage();
   document.getElementById('login-gate').style.display  = 'none';
   if (state.role === 'admin') {
     document.getElementById('admin-app').style.display = 'flex';
     document.getElementById('user-app').style.display  = 'none';
+    state.userAssignedAccounts = [];
     document.getElementById('admin-username-label').textContent = state.username;
     loadAccounts();
     navigate('dashboard');
@@ -273,6 +278,8 @@ function applyRole() {
   } else {
     document.getElementById('admin-app').style.display = 'none';
     document.getElementById('user-app').style.display  = 'block';
+    state.accounts = [];
+    state.userAssignedAccounts = [];
     document.getElementById('user-name-pill').textContent = state.username;
     loadUserStats();
     userNavigate('stats');
@@ -280,6 +287,7 @@ function applyRole() {
 }
 
 function doLogout() {
+  restoreAdminDetailPage();
   localStorage.removeItem('tgm_username');
   localStorage.removeItem('tgm_role');
   state.username = null;
@@ -325,6 +333,7 @@ function closeSidebar() {
 
 /* ══════════ ADMIN NAVIGATION ══════════ */
 function navigate(page, data) {
+  if (state.role === 'admin') restoreAdminDetailPage();
   state.currentPage = page;
   if (data !== undefined) state.detail = data;
 
@@ -342,7 +351,7 @@ function navigate(page, data) {
 
   const titles = {
     dashboard:      ['Accounts', 'Manage your Telegram accounts'],
-    adminusers:     ['Users', 'See who sold what numbers'],
+    adminusers:     ['User Sell', 'Manage user number assignments'],
     login:          ['Add Account', 'Authenticate a new account'],
     detail:         ['Account Detail', state.detail || ''],
     botrefer:       ['Bot Refer', 'Start a bot from any account'],
@@ -375,10 +384,15 @@ function navigate(page, data) {
 function userNavigate(page) {
   document.querySelectorAll('.user-page').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.user-nav-btn').forEach(b => b.classList.remove('active'));
+  const detailPage = document.getElementById('page-detail');
+  if (detailPage?.parentElement?.id === 'user-account-detail-slot') {
+    detailPage.classList.remove('active');
+  }
   const target = document.getElementById(`upage-${page}`);
   if (target) target.classList.add('active');
   const btn = document.getElementById(`unav-${page}`);
   if (btn) btn.classList.add('active');
+  if (page === 'buy-numbers') loadUserStats();
 }
 
 /* ══════════ FAILED LOGOUT ALERTS ══════════ */
@@ -919,26 +933,30 @@ function renderUsers(users) {
       <div class="user-table-header">
         <div>Username</div>
         <div>Numbers Sold</div>
+        <div>Assigned</div>
         <div>Total Logins</div>
-        <div>Action</div>
       </div>
       ${users.map(u => `
         <div class="user-table-row">
           <div class="flex items-center gap-2">
             <div class="user-avatar">${esc(u.username)[0].toUpperCase()}</div>
-            <span style="font-weight:600">${esc(u.username)}</span>
+            <button class="user-name-button" type="button" data-username="${esc(u.username)}">${esc(u.username)}</button>
           </div>
           <div><span class="badge badge-blue">${u.sold_count}</span></div>
+          <div><span class="badge badge-purple">${u.assigned_count || 0}</span></div>
           <div><span class="badge badge-dim">${u.total_logins}</span></div>
-          <div>
-            <button class="btn btn-secondary btn-sm" onclick='showUserDetail(${JSON.stringify(u)})'>Details</button>
-          </div>
         </div>
       `).join('')}
     </div>`;
+  el.querySelectorAll('.user-name-button').forEach(button => {
+    button.addEventListener('click', () => showUserDetail(button.dataset.username));
+  });
 }
 
-function showUserDetail(u) {
+function showUserDetail(username) {
+  const u = state.allUsers.find(user => user.username === username);
+  if (!u) return toast('User not found. Refresh the user list.', 'error');
+  state.selectedAdminUser = username;
   const panel = document.getElementById('user-detail-panel');
   document.getElementById('user-detail-name').textContent = u.username;
   const el = document.getElementById('user-detail-numbers');
@@ -952,7 +970,117 @@ function showUserDetail(u) {
         <span class="badge badge-green" style="margin-left:auto">Sold</span>
       </div>`).join('');
   }
+  renderAssignedNumbersForAdmin(u);
+  document.getElementById('assign-numbers-panel').style.display = 'none';
   panel.style.display = 'block';
+  panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function renderAssignedNumbersForAdmin(user) {
+  const el = document.getElementById('user-assigned-numbers');
+  const phones = user.assigned_numbers || [];
+  if (!phones.length) {
+    el.innerHTML = '<div class="empty-state" style="padding:14px"><p>No numbers assigned yet</p></div>';
+    return;
+  }
+  el.innerHTML = phones.map(phone => {
+    const country = getCountryInfo(phone);
+    return `
+      <div class="result-item ok assigned-admin-row">
+        <span class="badge badge-country">${country.flag} ${esc(country.name)}</span>
+        <span class="assigned-phone">${esc(phone)}</span>
+        <button class="btn btn-danger btn-sm unassign-user-number" type="button"
+          data-username="${esc(user.username)}" data-phone="${esc(phone)}">Remove</button>
+      </div>`;
+  }).join('');
+  el.querySelectorAll('.unassign-user-number').forEach(button => {
+    button.addEventListener('click', () =>
+      unassignUserNumber(button.dataset.username, button.dataset.phone),
+    );
+  });
+}
+
+function toggleAssignNumbers() {
+  const panel = document.getElementById('assign-numbers-panel');
+  const opening = panel.style.display === 'none';
+  panel.style.display = opening ? 'block' : 'none';
+  if (opening) renderAssignableCountries();
+}
+
+function renderAssignableCountries() {
+  const select = document.getElementById('assign-country-select');
+  if (!select) return;
+  const countries = new Map();
+  state.accounts.forEach(account => {
+    const info = getCountryInfo(account.phone);
+    countries.set(info.name, info);
+  });
+  const options = [...countries.values()].sort((a, b) => a.name.localeCompare(b.name));
+  select.innerHTML = options.length
+    ? options.map(country => `<option value="${esc(country.name)}">${country.flag} ${esc(country.name)}</option>`).join('')
+    : '<option value="">No account numbers available</option>';
+  renderAssignableNumbers();
+}
+
+function renderAssignableNumbers() {
+  const container = document.getElementById('assign-number-options');
+  const countrySelect = document.getElementById('assign-country-select');
+  const username = state.selectedAdminUser;
+  if (!container || !countrySelect || !username) return;
+  const currentUser = state.allUsers.find(user => user.username === username);
+  const assignedToOtherUsers = new Set(
+    state.allUsers
+      .filter(user => user.username !== username)
+      .flatMap(user => user.assigned_numbers || []),
+  );
+  const alreadyAssigned = new Set(currentUser?.assigned_numbers || []);
+  const candidates = state.accounts.filter(account => {
+    const phone = String(account.phone || '');
+    return getCountryInfo(phone).name === countrySelect.value &&
+      !alreadyAssigned.has(phone) &&
+      !assignedToOtherUsers.has(phone);
+  });
+  if (!candidates.length) {
+    container.innerHTML = '<div class="empty-state" style="padding:12px"><p>এই দেশের কোনো unassigned account number নেই।</p></div>';
+    return;
+  }
+  container.innerHTML = candidates.map(account => `
+    <label class="assign-number-option">
+      <input class="assign-account-checkbox" type="checkbox" value="${esc(account.phone)}">
+      <span class="badge badge-country">${getCountryInfo(account.phone).flag} ${esc(countrySelect.value)}</span>
+      <span class="assigned-phone">${esc(account.phone)}</span>
+    </label>`).join('');
+}
+
+async function assignSelectedNumbers() {
+  const username = state.selectedAdminUser;
+  const phones = [...document.querySelectorAll('.assign-account-checkbox:checked')]
+    .map(input => input.value);
+  if (!username) return;
+  if (!phones.length) return toast('Select at least one number', 'warn');
+  const btn = document.getElementById('btn-assign-selected');
+  setLoading(btn, true);
+  try {
+    await post(`/admin/users/${encodeURIComponent(username)}/assigned-numbers`, { phones });
+    toast(`${phones.length} number${phones.length === 1 ? '' : 's'} assigned to ${username}`, 'success');
+    await loadAdminUsers();
+    showUserDetail(username);
+  } catch (e) {
+    toast('Error: ' + e.message, 'error');
+  }
+  setLoading(btn, false);
+}
+
+async function unassignUserNumber(username, phone) {
+  if (!confirm(`${phone} নম্বরটির assignment ${username} থেকে সরাবেন? Account logout বা delete হবে না।`)) return;
+  try {
+    await del(`/admin/users/${encodeURIComponent(username)}/assigned-numbers/${encodeURIComponent(phone)}`);
+    toast(`${phone} assignment removed`, 'success');
+    await loadAdminUsers();
+    showUserDetail(username);
+  } catch (e) {
+    toast('Error: ' + e.message, 'error');
+  }
 }
 
 /* ══════════ BOT REFER ══════════ */
@@ -1227,13 +1355,20 @@ function userResetSell() {
 /* ══════════ USER STATS ══════════ */
 async function loadUserStats() {
   try {
-    const r = await get(`/user/${encodeURIComponent(state.username)}/stats`);
+    const userPath = `/user/${encodeURIComponent(state.username)}`;
+    const [r, assignedAccounts] = await Promise.all([
+      get(`${userPath}/stats`),
+      get(`${userPath}/assigned-accounts`),
+    ]);
+    state.userAssignedAccounts = Array.isArray(assignedAccounts) ? assignedAccounts : [];
+    if (state.role === 'user') state.accounts = state.userAssignedAccounts;
     document.getElementById('user-stat-sold').textContent   = r.sold_numbers.length;
     document.getElementById('user-stat-logins').textContent = r.total_logins;
 
     const el = document.getElementById('user-sold-list');
     if (!r.sold_numbers.length) {
-      el.innerHTML = '<div class="empty-state"><svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg><h3>No numbers sold yet</h3><p>Use "Sell Number" to get started</p></div>';
+      el.innerHTML = '<div class="empty-state"><svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 12 11 13 2 9 22 2"/></svg><h3>No numbers sold yet</h3><p>Use "Sell Number" to get started</p></div>';
+      renderUserAssignedAccounts();
       return;
     }
     el.innerHTML = r.sold_numbers.map((ph, i) => `
@@ -1242,8 +1377,73 @@ async function loadUserStats() {
         <span style="font-family:var(--mono);font-size:13px;font-weight:600">${esc(ph)}</span>
         <span class="badge badge-green" style="margin-left:auto">Sold</span>
       </div>`).join('');
+    renderUserAssignedAccounts();
   } catch (e) {
     toast('Failed to load stats: ' + e.message, 'error');
+  }
+}
+
+function renderUserAssignedAccounts() {
+  const el = document.getElementById('user-assigned-list');
+  if (!el) return;
+  if (!state.userAssignedAccounts.length) {
+    el.innerHTML = '<div class="empty-state"><h3>No numbers assigned yet</h3><p>Contact the admin if you expect to see a number here.</p></div>';
+    return;
+  }
+  el.innerHTML = state.userAssignedAccounts.map(account => {
+    const country = getCountryInfo(account.phone);
+    return `
+      <button class="user-assigned-account" type="button" data-phone="${esc(account.phone)}">
+        <span class="badge badge-country">${country.flag} ${esc(country.name)}</span>
+        <span class="assigned-phone">${esc(account.phone)}</span>
+        <span class="user-assigned-action">Open details →</span>
+      </button>`;
+  }).join('');
+  el.querySelectorAll('.user-assigned-account').forEach(button => {
+    button.addEventListener('click', () => openUserAssignedAccount(button.dataset.phone));
+  });
+}
+
+function openUserAssignedAccount(phone) {
+  const account = state.userAssignedAccounts.find(item => item.phone === phone);
+  if (!account) return toast('This number is no longer assigned to you', 'error');
+  const detailPage = document.getElementById('page-detail');
+  const slot = document.getElementById('user-account-detail-slot');
+  if (detailPage.parentElement !== slot) {
+    state.adminDetailPlaceholder = document.createComment('admin account detail location');
+    detailPage.parentNode.insertBefore(state.adminDetailPlaceholder, detailPage);
+    slot.appendChild(detailPage);
+  }
+  document.querySelectorAll('.user-page').forEach(page => page.classList.remove('active'));
+  document.querySelectorAll('.user-nav-btn').forEach(button => {
+    button.classList.toggle('active', button.id === 'unav-buy-numbers');
+  });
+  state.detail = phone;
+  detailPage.classList.add('active');
+  loadDetail(phone);
+}
+
+function restoreAdminDetailPage() {
+  const detailPage = document.getElementById('page-detail');
+  const slot = document.getElementById('user-account-detail-slot');
+  if (!detailPage || !slot || detailPage.parentElement !== slot) return;
+  detailPage.classList.remove('active');
+  const placeholder = state.adminDetailPlaceholder;
+  if (placeholder?.parentNode) {
+    placeholder.parentNode.insertBefore(detailPage, placeholder);
+    placeholder.remove();
+  } else {
+    document.querySelector('#admin-app .content')?.appendChild(detailPage);
+  }
+  state.adminDetailPlaceholder = null;
+}
+
+function backFromDetail() {
+  if (state.role === 'user') {
+    restoreAdminDetailPage();
+    userNavigate('buy-numbers');
+  } else {
+    navigate('dashboard');
   }
 }
 
@@ -1257,6 +1457,8 @@ async function loadDetail(phone) {
   document.getElementById('detail-name').textContent     = `${acc.firstName||''} ${acc.lastName||''}`.trim();
   document.getElementById('detail-phone').textContent    = acc.phone;
   document.getElementById('detail-username').textContent = acc.username ? '@'+acc.username : '';
+  const removeButton = document.getElementById('detail-remove-btn');
+  if (removeButton) removeButton.style.display = state.role === 'admin' ? '' : 'none';
 
   const badge = document.getElementById('detail-2fa-badge');
   badge.textContent  = acc.has2fa ? '2FA ON' : '2FA OFF';

@@ -608,6 +608,37 @@ select.input option { background: var(--bg3); }
 }
 .user-table-row:hover { background: var(--glass); }
 
+.user-name-button {
+  border: 0; padding: 0; background: transparent; color: var(--accent);
+  font: inherit; font-weight: 700; cursor: pointer; text-align: left;
+}
+.user-name-button:hover { text-decoration: underline; }
+
+.assign-number-options {
+  max-height: 280px; overflow: auto; border: 1px solid var(--border);
+  border-radius: 9px; padding: 6px; background: var(--bg2);
+}
+.assign-number-option,
+.assigned-admin-row,
+.user-assigned-account {
+  display: flex; align-items: center; gap: 10px; min-width: 0;
+}
+.assign-number-option {
+  padding: 9px 8px; border-bottom: 1px solid var(--border); cursor: pointer;
+}
+.assign-number-option:last-child { border-bottom: 0; }
+.assign-number-option input { accent-color: var(--accent); flex-shrink: 0; }
+.assigned-phone { font-family: var(--mono); font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
+.assigned-admin-row { margin-bottom: 6px; }
+.user-assigned-account {
+  width: 100%; margin-bottom: 8px; padding: 12px;
+  border: 1px solid var(--border); border-radius: 9px;
+  background: var(--glass); color: var(--text); text-align: left;
+  cursor: pointer; transition: border-color .15s, background .15s;
+}
+.user-assigned-account:hover { border-color: var(--accent); background: rgba(0,194,255,.06); }
+.user-assigned-action { color: var(--accent); font-size: 11px; margin-left: auto; white-space: nowrap; }
+
 .user-avatar {
   width: 30px; height: 30px; border-radius: 50%;
   background: linear-gradient(135deg, var(--accent2), var(--accent));

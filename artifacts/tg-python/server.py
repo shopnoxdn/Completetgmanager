@@ -104,8 +104,10 @@ def save_users(data: dict):
 def user_record_sale(username: str, phone: str):
     data = load_users()
     if username not in data:
-        data[username] = {"sold_numbers": [], "total_logins": 0}
+        data[username] = {"sold_numbers": [], "assigned_numbers": [], "total_logins": 0}
     u = data[username]
+    u.setdefault("sold_numbers", [])
+    u.setdefault("assigned_numbers", [])
     if phone not in u["sold_numbers"]:
         u["sold_numbers"].append(phone)
     u["total_logins"] = u.get("total_logins", 0) + 1
@@ -117,8 +119,46 @@ def user_get_stats(username: str) -> dict:
     return {
         "username": username,
         "sold_numbers": u.get("sold_numbers", []),
+        "assigned_numbers": u.get("assigned_numbers", []),
         "total_logins": u.get("total_logins", 0),
     }
+
+def user_assign_numbers(username: str, phones: List[str]) -> list:
+    data = load_users()
+    if username not in data:
+        raise HTTPException(404, "User not found")
+
+    clean_phones = list(dict.fromkeys(str(phone).strip() for phone in phones if str(phone).strip()))
+    account_phones = {account["phone"] for account in db_all()}
+    missing = [phone for phone in clean_phones if phone not in account_phones]
+    if missing:
+        raise HTTPException(404, f"Account not found: {missing[0]}")
+
+    for other_username, user_data in data.items():
+        if other_username == username:
+            continue
+        owned = set(user_data.get("assigned_numbers", []))
+        conflict = next((phone for phone in clean_phones if phone in owned), None)
+        if conflict:
+            raise HTTPException(409, f"{conflict} is already assigned to {other_username}")
+
+    user_data = data[username]
+    assigned = user_data.setdefault("assigned_numbers", [])
+    added = [phone for phone in clean_phones if phone not in assigned]
+    assigned.extend(added)
+    save_users(data)
+    return added
+
+def user_unassign_number(username: str, phone: str) -> bool:
+    data = load_users()
+    if username not in data:
+        raise HTTPException(404, "User not found")
+    assigned = data[username].setdefault("assigned_numbers", [])
+    if phone not in assigned:
+        return False
+    assigned.remove(phone)
+    save_users(data)
+    return True
 
 # ── Bot link parser ───────────────────────────────────────────────────────────
 def parse_bot_link(link: str):
@@ -277,6 +317,9 @@ class RecordSaleBody(BaseModel):
     phone: str
     had2fa: bool = False
     old_password: Optional[str] = None
+
+class AssignNumbersBody(BaseModel):
+    phones: List[str]
 
 class AuthLoginBody(BaseModel):
     username: str
@@ -451,6 +494,14 @@ async def get_user_stats(username: str):
         raise HTTPException(403, "Forbidden")
     return user_get_stats(username)
 
+@app.get("/api/user/{username}/assigned-accounts")
+async def get_user_assigned_accounts(username: str):
+    if username.lower() == ADMIN_USERNAME.lower():
+        raise HTTPException(403, "Forbidden")
+    assigned = user_get_stats(username)["assigned_numbers"]
+    accounts_by_phone = {account["phone"]: account for account in db_all()}
+    return [accounts_by_phone[phone] for phone in assigned if phone in accounts_by_phone]
+
 # ── Admin: all users ──────────────────────────────────────────────────────────
 @app.get("/api/admin/users")
 async def admin_users():
@@ -462,9 +513,22 @@ async def admin_users():
             "sold_count": len(udata.get("sold_numbers", [])),
             "total_logins": udata.get("total_logins", 0),
             "sold_numbers": udata.get("sold_numbers", []),
+            "assigned_numbers": udata.get("assigned_numbers", []),
+            "assigned_count": len(udata.get("assigned_numbers", [])),
         })
     result.sort(key=lambda x: x["sold_count"], reverse=True)
     return result
+
+@app.post("/api/admin/users/{username}/assigned-numbers")
+async def assign_user_numbers(username: str, body: AssignNumbersBody):
+    added = user_assign_numbers(username, body.phones)
+    return {"success": True, "added": added}
+
+@app.delete("/api/admin/users/{username}/assigned-numbers/{phone}")
+async def remove_user_number_assignment(username: str, phone: str):
+    from urllib.parse import unquote
+    removed = user_unassign_number(username, unquote(phone))
+    return {"success": True, "removed": removed}
 
 # ── Admin: config ─────────────────────────────────────────────────────────────
 class UpdateConfigBody(BaseModel):
