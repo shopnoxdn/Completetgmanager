@@ -7,8 +7,14 @@
   "@taitan_fegoue_01": {
     "sold_numbers": [],
     "assigned_numbers": [
-      "+8801780749913"
+      "+8801780749913",
+      "+88013 24392947"
     ],
+    "total_logins": 0
+  },
+  "taitan": {
+    "sold_numbers": [],
+    "assigned_numbers": [],
     "total_logins": 0
   }
 }
