@@ -18,6 +18,11 @@ const state = {
   pendingZipFile: null,
   sessionCounts: {},
   accountDisplayLimit: 60,
+  authMode: 'login',
+  storeBalance: 0,
+  storeProducts: [],
+  storePurchases: [],
+  editingStoreProductId: null,
 };
 
 /* ══════════ API ══════════ */
@@ -246,28 +251,35 @@ function toast(msg, type = 'info') {
 
 /* ══════════ LOGIN GATE ══════════ */
 async function gateLogin() {
-  const u = (document.getElementById('gate-username').value || '').trim();
-  if (!u) return toast('Please enter a username', 'warn');
-  const isAdmin = u.toLowerCase() === ADMIN_USERNAME.toLowerCase();
-  const passwordGroup = document.getElementById('gate-password-group');
-  if (isAdmin && passwordGroup?.style.display === 'none') {
-    updateGatePasswordVisibility();
-    document.getElementById('gate-password')?.focus();
-    return toast('Enter the admin password, then press Continue again', 'warn');
-  }
+  const identity = (document.getElementById('gate-username').value || '').trim();
+  if (!identity) return toast(state.authMode === 'register' ? 'Enter your email address' : 'Enter your email or admin username', 'warn');
   const password = document.getElementById('gate-password')?.value || '';
-  if (isAdmin && !password) return toast('Please enter the admin password', 'warn');
+  const isAdmin = identity.toLowerCase() === ADMIN_USERNAME.toLowerCase();
+  let endpoint = '/auth/login';
+  let credentials;
+  if (state.authMode === 'register') {
+    const confirmPassword = document.getElementById('gate-password-confirm')?.value || '';
+    if (isAdmin) return toast('The admin account cannot be registered here', 'warn');
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(identity)) return toast('Enter a valid email address', 'warn');
+    if (password.length < 10) return toast('Password must be at least 10 characters', 'warn');
+    if (password !== confirmPassword) return toast('Passwords do not match', 'warn');
+    endpoint = '/auth/register';
+    credentials = { email: identity.toLowerCase(), password };
+  } else {
+    if (!password) return toast(isAdmin ? 'Please enter the admin password' : 'Please enter your password', 'warn');
+    if (!isAdmin && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(identity)) return toast('Sign in with the email used to register', 'warn');
+    credentials = { username: isAdmin ? identity : identity.toLowerCase(), password };
+  }
   const btn = document.getElementById('gate-btn');
   setLoading(btn, true);
   try {
-    const credentials = { username: u };
-    if (isAdmin) credentials.password = password;
-    const r = await post('/auth/login', credentials);
+    const r = await post(endpoint, credentials);
     state.username = r.username;
     state.role     = r.role;
     localStorage.setItem('tgm_username', r.username);
     localStorage.setItem('tgm_role', r.role);
     document.getElementById('gate-password').value = '';
+    document.getElementById('gate-password-confirm').value = '';
     applyRole();
   } catch (e) {
     toast('Error: ' + e.message, 'error');
@@ -275,14 +287,38 @@ async function gateLogin() {
   setLoading(btn, false);
 }
 
+function toggleAuthMode() {
+  state.authMode = state.authMode === 'login' ? 'register' : 'login';
+  const registering = state.authMode === 'register';
+  document.getElementById('gate-subtitle').textContent = registering
+    ? 'Create a customer account with your email and password.'
+    : 'Sign in with your email, or use the admin username.';
+  document.getElementById('gate-identity-label').textContent = registering
+    ? 'Email address'
+    : 'Email address or admin username';
+  document.getElementById('gate-username').placeholder = registering
+    ? 'name@example.com'
+    : 'name@example.com (admin: sopnox)';
+  document.getElementById('gate-password-label').textContent = registering
+    ? 'Password (at least 10 characters)'
+    : 'Password';
+  document.getElementById('gate-password').autocomplete = registering ? 'new-password' : 'current-password';
+  document.getElementById('gate-confirm-group').style.display = registering ? '' : 'none';
+  document.getElementById('gate-btn').lastChild.textContent = registering ? ' Create account' : ' Sign in';
+  document.getElementById('gate-mode-toggle').textContent = registering
+    ? 'Already have an account? Sign in'
+    : 'Create account';
+  document.getElementById('gate-password').value = '';
+  document.getElementById('gate-password-confirm').value = '';
+}
+
 function updateGatePasswordVisibility() {
   const username = (document.getElementById('gate-username')?.value || '').trim();
   const isAdmin = username.toLowerCase() === ADMIN_USERNAME.toLowerCase();
-  const group = document.getElementById('gate-password-group');
-  const wasHidden = group?.style.display === 'none';
-  if (group) group.style.display = isAdmin ? '' : 'none';
-  const password = document.getElementById('gate-password');
-  if (password && (!isAdmin || wasHidden)) password.value = '';
+  if (state.authMode === 'login') {
+    const label = document.getElementById('gate-password-label');
+    if (label) label.textContent = isAdmin ? 'Admin Password' : 'Password';
+  }
 }
 
 function applyRole() {
@@ -291,6 +327,7 @@ function applyRole() {
   if (state.role === 'admin') {
     document.getElementById('admin-app').style.display = 'flex';
     document.getElementById('user-app').style.display  = 'none';
+    document.getElementById('store-app').style.display = 'none';
     state.userAssignedAccounts = [];
     document.getElementById('admin-username-label').textContent = state.username;
     loadAccounts();
@@ -300,12 +337,13 @@ function applyRole() {
     setInterval(loadFailedLogouts, 60000);
   } else {
     document.getElementById('admin-app').style.display = 'none';
-    document.getElementById('user-app').style.display  = 'block';
+    document.getElementById('user-app').style.display  = 'none';
+    document.getElementById('store-app').style.display = 'block';
     state.accounts = [];
     state.userAssignedAccounts = [];
-    document.getElementById('user-name-pill').textContent = state.username;
-    loadUserStats();
-    userNavigate('stats');
+    document.getElementById('store-customer-email').textContent = state.username;
+    loadStoreProfile();
+    storeNavigate('shop');
   }
 }
 
@@ -319,9 +357,11 @@ function doLogout() {
   document.getElementById('login-gate').style.display  = 'flex';
   document.getElementById('admin-app').style.display   = 'none';
   document.getElementById('user-app').style.display    = 'none';
+  document.getElementById('store-app').style.display   = 'none';
   document.getElementById('gate-username').value       = '';
   document.getElementById('gate-password').value       = '';
-  updateGatePasswordVisibility();
+  document.getElementById('gate-password-confirm').value = '';
+  if (state.authMode === 'register') toggleAuthMode();
 }
 
 /* ══════════ HEALTH CHECK ══════════ */
@@ -377,6 +417,7 @@ function navigate(page, data) {
 
   const titles = {
     dashboard:      ['Accounts', 'Manage your Telegram accounts'],
+    catalog:        ['Product Catalog', 'Manage products, prices, stock, and purchase limits'],
     adminusers:     ['User Sell', 'Manage user number assignments'],
     login:          ['Add Account', 'Authenticate a new account'],
     detail:         ['Account Detail', state.detail || ''],
@@ -396,6 +437,7 @@ function navigate(page, data) {
   if (page !== 'dashboard') exitSelectMode();
   if (page === 'detail' && state.detail) loadDetail(state.detail);
   if (page === 'dashboard') { loadAccounts(); loadFailedLogouts(); }
+  if (page === 'catalog') loadStoreAdminProducts();
   if (page === 'adminusers') loadAdminUsers();
   if (page === 'botrefer') { populateAccountSelects(); updateBotAllCount(); }
   if (page === 'sessiondl') { populateAccountSelects(); updateDlCount(); }
@@ -419,6 +461,223 @@ function userNavigate(page) {
   const btn = document.getElementById(`unav-${page}`);
   if (btn) btn.classList.add('active');
   if (page === 'buy-numbers') loadUserStats();
+}
+
+/* ══════════ CUSTOMER STORE ══════════ */
+function storeNavigate(page) {
+  document.querySelectorAll('#store-app .user-page').forEach(item => item.classList.remove('active'));
+  document.querySelectorAll('#store-app .user-nav-btn').forEach(item => item.classList.remove('active'));
+  document.getElementById(`store-page-${page}`)?.classList.add('active');
+  document.getElementById(`unav-${page}`)?.classList.add('active');
+  if (page === 'shop') loadStoreProducts();
+  if (page === 'purchases') loadStorePurchases();
+  loadStoreProfile();
+}
+
+async function loadStoreProfile() {
+  try {
+    const profile = await get('/store/me');
+    state.storeBalance = Number(profile.balance_credits) || 0;
+    const balance = document.getElementById('store-customer-balance');
+    if (balance) balance.textContent = state.storeBalance.toLocaleString();
+    renderStoreProducts();
+  } catch (e) {
+    toast('Could not load your balance: ' + e.message, 'error');
+  }
+}
+
+async function loadStoreProducts() {
+  const el = document.getElementById('store-product-list');
+  if (!el) return;
+  el.innerHTML = '<div class="empty-state"><p>Loading products…</p></div>';
+  try {
+    state.storeProducts = await get('/store/products');
+    renderStoreProducts();
+  } catch (e) {
+    el.innerHTML = `<div class="empty-state"><p style="color:var(--danger)">${esc(e.message)}</p></div>`;
+  }
+}
+
+function renderStoreProducts() {
+  const el = document.getElementById('store-product-list');
+  if (!el) return;
+  if (!state.storeProducts.length) {
+    el.innerHTML = '<div class="empty-state"><h3>No products available</h3><p>Please check again later.</p></div>';
+    return;
+  }
+  el.innerHTML = state.storeProducts.map(product => {
+    const enoughCredits = state.storeBalance >= Number(product.price_credits);
+    return `
+      <article class="store-product-card">
+        <div class="store-product-category">${esc(product.category || 'Product')}</div>
+        <h3>${esc(product.name)}</h3>
+        <p>${esc(product.description || 'No description provided.')}</p>
+        <div class="store-product-meta">
+          <span>${Number(product.price_credits).toLocaleString()} credits</span>
+          <span>${Number(product.stock)} in stock</span>
+          <span>Limit ${Number(product.per_user_limit)} per user</span>
+        </div>
+        <button class="btn btn-primary btn-full store-buy-button" type="button"
+          data-product-id="${Number(product.id)}" ${enoughCredits ? '' : 'disabled'}>
+          ${enoughCredits ? 'Buy product' : 'Not enough credits'}
+        </button>
+      </article>`;
+  }).join('');
+  el.querySelectorAll('.store-buy-button').forEach(button => {
+    button.addEventListener('click', () => buyStoreProduct(Number(button.dataset.productId), button));
+  });
+}
+
+async function buyStoreProduct(productId, button) {
+  if (!Number.isInteger(productId) || productId < 1) return;
+  setLoading(button, true);
+  try {
+    const receipt = await post('/store/purchases', { product_id: productId });
+    toast(`Purchase complete. Receipt: ${receipt.receipt_id.slice(0, 12)}`, 'success');
+    await Promise.all([loadStoreProfile(), loadStoreProducts(), loadStorePurchases()]);
+  } catch (e) {
+    toast(e.message, 'error');
+    await loadStoreProfile();
+  } finally {
+    setLoading(button, false);
+  }
+}
+
+async function loadStorePurchases() {
+  const el = document.getElementById('store-purchase-list');
+  if (!el) return;
+  el.innerHTML = '<div class="empty-state"><p>Loading receipts…</p></div>';
+  try {
+    state.storePurchases = await get('/store/purchases');
+    if (!state.storePurchases.length) {
+      el.innerHTML = '<div class="empty-state"><h3>No purchases yet</h3><p>Completed purchases will appear here.</p></div>';
+      return;
+    }
+    el.innerHTML = state.storePurchases.map(receipt => `
+      <article class="store-receipt">
+        <div class="store-receipt-main">
+          <strong>${esc(receipt.product_name)}</strong>
+          <span class="text-dim text-sm">${new Date(receipt.purchased_at).toLocaleString()}</span>
+        </div>
+        <div class="store-receipt-meta">
+          <span>Receipt ${esc(receipt.id.slice(0, 12))}</span>
+          <span>Qty ${Number(receipt.quantity)}</span>
+          <strong>${Number(receipt.total_credits).toLocaleString()} credits</strong>
+        </div>
+      </article>`).join('');
+  } catch (e) {
+    el.innerHTML = `<div class="empty-state"><p style="color:var(--danger)">${esc(e.message)}</p></div>`;
+  }
+}
+
+/* ══════════ ADMIN PRODUCT CATALOG ══════════ */
+async function loadStoreAdminProducts() {
+  const el = document.getElementById('store-admin-products');
+  if (!el) return;
+  el.innerHTML = '<div class="empty-state"><p>Loading products…</p></div>';
+  try {
+    state.storeProducts = await get('/store/admin/products');
+    if (!state.storeProducts.length) {
+      el.innerHTML = '<div class="empty-state"><h3>No products yet</h3><p>Add a product to make it available in the customer store.</p></div>';
+      return;
+    }
+    el.innerHTML = `
+      <div class="store-admin-list">
+        ${state.storeProducts.map(product => `
+          <article class="store-admin-product ${product.active ? '' : 'is-inactive'}">
+            <div class="store-admin-product-info">
+              <strong>${esc(product.name)}</strong>
+              <span class="text-dim text-sm">${esc(product.category || 'Uncategorized')} · ${Number(product.price_credits).toLocaleString()} credits</span>
+              <span class="text-dim text-sm">Stock ${Number(product.stock)} · Sold ${Number(product.sold_count)} · Limit ${Number(product.per_user_limit)} per user</span>
+              <span class="badge ${product.active ? 'badge-green' : 'badge-dim'}">${product.active ? 'Active' : 'Removed'}</span>
+            </div>
+            <div class="store-admin-product-actions">
+              <button class="btn btn-secondary btn-sm store-edit-product" type="button" data-product-id="${Number(product.id)}">Edit</button>
+              ${product.active ? `<button class="btn btn-danger btn-sm store-remove-product" type="button" data-product-id="${Number(product.id)}">Delete</button>` : ''}
+            </div>
+          </article>`).join('')}
+      </div>`;
+    el.querySelectorAll('.store-edit-product').forEach(button => {
+      button.addEventListener('click', () => showStoreProductForm(Number(button.dataset.productId)));
+    });
+    el.querySelectorAll('.store-remove-product').forEach(button => {
+      button.addEventListener('click', () => deactivateStoreProduct(Number(button.dataset.productId)));
+    });
+  } catch (e) {
+    el.innerHTML = `<div class="empty-state"><p style="color:var(--danger)">${esc(e.message)}</p></div>`;
+  }
+}
+
+function showStoreProductForm(productId = null) {
+  const product = productId ? state.storeProducts.find(item => item.id === productId) : null;
+  state.editingStoreProductId = product?.id || null;
+  document.getElementById('store-product-form-title').textContent = product ? 'Edit Product' : 'Add Product';
+  document.getElementById('store-product-name').value = product?.name || '';
+  document.getElementById('store-product-category').value = product?.category || '';
+  document.getElementById('store-product-description').value = product?.description || '';
+  document.getElementById('store-product-price').value = product?.price_credits ?? 0;
+  document.getElementById('store-product-stock').value = product?.stock ?? 1;
+  document.getElementById('store-product-limit').value = product?.per_user_limit ?? 1;
+  document.getElementById('store-product-form').style.display = 'block';
+  document.getElementById('store-product-name').focus();
+}
+
+function hideStoreProductForm() {
+  state.editingStoreProductId = null;
+  const form = document.getElementById('store-product-form');
+  if (form) form.style.display = 'none';
+  ['store-product-name','store-product-category','store-product-description'].forEach(id => {
+    const input = document.getElementById(id);
+    if (input) input.value = '';
+  });
+  document.getElementById('store-product-price').value = '0';
+  document.getElementById('store-product-stock').value = '1';
+  document.getElementById('store-product-limit').value = '1';
+}
+
+async function saveStoreProduct() {
+  const payload = {
+    name: document.getElementById('store-product-name').value.trim(),
+    category: document.getElementById('store-product-category').value.trim(),
+    description: document.getElementById('store-product-description').value.trim(),
+    price_credits: Number(document.getElementById('store-product-price').value),
+    stock: Number(document.getElementById('store-product-stock').value),
+    per_user_limit: Number(document.getElementById('store-product-limit').value),
+  };
+  if (!payload.name) return toast('Enter a product name', 'warn');
+  if (!Object.values(payload).slice(3).every(value => Number.isSafeInteger(value) && value >= 0)) {
+    return toast('Price, stock, and limit must be whole numbers', 'warn');
+  }
+  if (payload.per_user_limit < 1) return toast('Limit per user must be at least 1', 'warn');
+  const button = document.getElementById('btn-save-store-product');
+  setLoading(button, true);
+  try {
+    if (state.editingStoreProductId) {
+      await api('PUT', `/store/admin/products/${state.editingStoreProductId}`, payload);
+      toast('Product updated', 'success');
+    } else {
+      await post('/store/admin/products', payload);
+      toast('Product added', 'success');
+    }
+    hideStoreProductForm();
+    await loadStoreAdminProducts();
+  } catch (e) {
+    toast('Error: ' + e.message, 'error');
+  } finally {
+    setLoading(button, false);
+  }
+}
+
+async function deactivateStoreProduct(productId) {
+  if (!Number.isInteger(productId) || productId < 1) return;
+  if (!confirm('Remove this product from the customer catalog? Existing receipts will remain.')) return;
+  try {
+    await del(`/store/admin/products/${productId}`);
+    toast('Product removed from the catalog', 'success');
+    await loadStoreAdminProducts();
+  } catch (e) {
+    toast('Error: ' + e.message, 'error');
+  }
 }
 
 /* ══════════ FAILED LOGOUT ALERTS ══════════ */

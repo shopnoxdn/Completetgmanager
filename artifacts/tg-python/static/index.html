@@ -18,19 +18,24 @@
       <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><path d="M22 2L11 13"/><path d="M22 2L15 22l-4-9-9-4 20-7z"/></svg>
       <span>TG Manager</span>
     </div>
-    <p class="gate-sub">Enter your username to continue</p>
+    <p class="gate-sub" id="gate-subtitle">Sign in with your email, or use the admin username.</p>
     <div class="input-group">
-      <label class="input-label">Username</label>
-      <input class="input" id="gate-username" type="text" placeholder="Enter username..." autocomplete="username" autocapitalize="none"/>
+      <label class="input-label" id="gate-identity-label" for="gate-username">Email address or admin username</label>
+      <input class="input" id="gate-username" type="text" placeholder="name@example.com" autocomplete="username" inputmode="email" autocapitalize="none"/>
     </div>
-    <div class="input-group" id="gate-password-group" style="display:none">
-      <label class="input-label" for="gate-password">Admin Password</label>
-      <input class="input" id="gate-password" type="password" placeholder="Enter admin password..." autocomplete="current-password"/>
+    <div class="input-group" id="gate-password-group">
+      <label class="input-label" for="gate-password" id="gate-password-label">Password</label>
+      <input class="input" id="gate-password" type="password" placeholder="Enter password..." autocomplete="current-password"/>
+    </div>
+    <div class="input-group" id="gate-confirm-group" style="display:none">
+      <label class="input-label" for="gate-password-confirm">Confirm password</label>
+      <input class="input" id="gate-password-confirm" type="password" placeholder="Re-enter password..." autocomplete="new-password"/>
     </div>
     <button class="btn btn-primary btn-full btn-lg" id="gate-btn" onclick="gateLogin()">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h4a2 2 0 012 2v14a2 2 0 01-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>
-      Continue
+      Sign in
     </button>
+    <button class="btn btn-secondary btn-full mt-2" id="gate-mode-toggle" type="button" onclick="toggleAuthMode()">Create account</button>
   </div>
 </div>
 
@@ -51,9 +56,9 @@
           <span>Accounts</span>
           <span class="nav-badge" id="acct-badge" style="display:none"></span>
         </div>
-        <div class="nav-item" data-page="adminusers" onclick="navigate('adminusers');closeSidebar()">
+        <div class="nav-item" data-page="catalog" onclick="navigate('catalog');closeSidebar()">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
-          <span>User Sell</span>
+          <span>Product Catalog</span>
           <span class="nav-badge" id="users-badge" style="display:none"></span>
         </div>
         <div class="nav-item" data-page="login" onclick="navigate('login');closeSidebar()">
@@ -202,7 +207,60 @@
           </div>
         </div>
 
-        <!-- ── ADMIN USERS ── -->
+        <!-- ── PRODUCT CATALOG ── -->
+        <div class="page" id="page-catalog">
+          <div class="card mb-4">
+            <div class="card-header">
+              <div class="card-title">Product Catalog</div>
+              <div class="flex gap-2">
+                <button class="btn btn-primary btn-sm" type="button" onclick="showStoreProductForm()">Add Product</button>
+                <button class="btn btn-secondary btn-sm" type="button" onclick="loadStoreAdminProducts()">Refresh</button>
+              </div>
+            </div>
+            <div class="card" id="store-product-form" style="display:none;margin-bottom:12px;background:var(--bg3)">
+              <div class="card-header">
+                <div class="card-title" id="store-product-form-title">Add Product</div>
+                <button class="btn btn-secondary btn-sm" type="button" onclick="hideStoreProductForm()">Close</button>
+              </div>
+              <div class="grid-2">
+                <div class="input-group">
+                  <label class="input-label" for="store-product-name">Product name</label>
+                  <input class="input" id="store-product-name" maxlength="100" placeholder="Product name"/>
+                </div>
+                <div class="input-group">
+                  <label class="input-label" for="store-product-category">Category</label>
+                  <input class="input" id="store-product-category" maxlength="60" placeholder="Optional category"/>
+                </div>
+              </div>
+              <div class="input-group">
+                <label class="input-label" for="store-product-description">Description</label>
+                <textarea class="input" id="store-product-description" maxlength="1000" rows="3" placeholder="Describe the product. Do not put passwords, OTPs, session files, or private account data here."></textarea>
+              </div>
+              <div class="grid-3">
+                <div class="input-group">
+                  <label class="input-label" for="store-product-price">Price (credits)</label>
+                  <input class="input" id="store-product-price" type="number" min="0" step="1" value="0"/>
+                </div>
+                <div class="input-group">
+                  <label class="input-label" for="store-product-stock">Stock</label>
+                  <input class="input" id="store-product-stock" type="number" min="0" step="1" value="1"/>
+                </div>
+                <div class="input-group">
+                  <label class="input-label" for="store-product-limit">Limit per user</label>
+                  <input class="input" id="store-product-limit" type="number" min="1" step="1" value="1"/>
+                </div>
+              </div>
+              <div class="flex gap-2">
+                <button class="btn btn-primary flex-1" id="btn-save-store-product" type="button" onclick="saveStoreProduct()">Save Product</button>
+                <button class="btn btn-secondary" type="button" onclick="hideStoreProductForm()">Cancel</button>
+              </div>
+            </div>
+            <div class="text-dim text-sm mb-3">Product catalog only. Do not list or deliver passwords, OTPs, session files, or private account data.</div>
+            <div id="store-admin-products"><div class="empty-state"><p>Loading...</p></div></div>
+          </div>
+        </div>
+
+        <!-- ── LEGACY USER ASSIGNMENTS ── -->
         <div class="page" id="page-adminusers">
           <div class="card mb-4">
             <div class="card-header">
@@ -582,7 +640,7 @@
 
       <nav class="bottom-nav">
         <div class="bnav-item active" data-page="dashboard" onclick="navigate('dashboard')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg><span class="bnav-label">Accounts</span></div>
-        <div class="bnav-item" data-page="adminusers" onclick="navigate('adminusers')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/></svg><span class="bnav-label">User Sell</span></div>
+        <div class="bnav-item" data-page="catalog" onclick="navigate('catalog')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 2h12l3 6-9 14L3 8z"/><path d="M3 8h18"/></svg><span class="bnav-label">Catalog</span></div>
         <div class="bnav-item" data-page="botrefer" onclick="navigate('botrefer')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg><span class="bnav-label">Bot</span></div>
         <div class="bnav-item" data-page="sessiondl" onclick="navigate('sessiondl')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg><span class="bnav-label">DL</span></div>
         <div class="bnav-item" data-page="more" onclick="navigate('more')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg><span class="bnav-label">More</span></div>
@@ -591,8 +649,55 @@
   </div>
 </div>
 
-<!-- ══ USER APP ══ -->
-<div id="user-app" style="display:none">
+<!-- ══ CUSTOMER STORE ══ -->
+<div id="store-app" style="display:none">
+  <div id="store-wrap">
+    <div class="user-topbar">
+      <div class="topbar-left">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><path d="M6 2h12l3 6-9 14L3 8z"/><path d="M3 8h18"/></svg>
+        <span style="font-weight:700;font-size:15px">TG Manager Store</span>
+      </div>
+      <div class="topbar-actions">
+        <div class="user-name-pill" id="store-customer-email"></div>
+        <button class="btn btn-secondary btn-sm" onclick="doLogout()">Logout</button>
+      </div>
+    </div>
+    <div class="user-content">
+      <div class="card store-wallet-card">
+        <div>
+          <div class="text-dim text-sm">Available balance</div>
+          <div class="store-balance"><span id="store-customer-balance">0</span> credits</div>
+          <div class="text-dim text-sm">Balance top-up will be added later.</div>
+        </div>
+      </div>
+      <div class="user-nav">
+        <button class="user-nav-btn active" id="unav-shop" onclick="storeNavigate('shop')">Buy Products</button>
+        <button class="user-nav-btn" id="unav-purchases" onclick="storeNavigate('purchases')">Your Purchases</button>
+      </div>
+      <section class="user-page active" id="store-page-shop">
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">Available Products</div>
+            <button class="btn btn-secondary btn-sm" type="button" onclick="loadStoreProducts()">Refresh</button>
+          </div>
+          <div class="store-product-grid" id="store-product-list"><div class="empty-state"><p>Loading products…</p></div></div>
+        </div>
+      </section>
+      <section class="user-page" id="store-page-purchases">
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">Your Purchases</div>
+            <button class="btn btn-secondary btn-sm" type="button" onclick="loadStorePurchases()">Refresh</button>
+          </div>
+          <div id="store-purchase-list"><div class="empty-state"><p>Loading receipts…</p></div></div>
+        </div>
+      </section>
+    </div>
+  </div>
+</div>
+
+<!-- Legacy user number-selling UI is intentionally kept hidden; customer API access is disabled. -->
+<div id="user-app" style="display:none!important">
   <div id="user-wrap">
     <div class="user-topbar">
       <div class="topbar-left">

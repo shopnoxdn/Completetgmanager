@@ -1,14 +1,14 @@
-import os, re, glob, shutil, sqlite3, asyncio, json, io, zipfile, tempfile
+import os, re, glob, shutil, sqlite3, asyncio, json, io, zipfile, tempfile, secrets
 import base64, hashlib, hmac, time
 from uuid import uuid4
 from pathlib import Path
 from typing import Optional, List
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import uvicorn
 
 from telethon import TelegramClient
@@ -61,6 +61,7 @@ DB_PATH            = str(BASE_DIR / "accounts.db")
 USERS_PATH         = BASE_DIR / "users.json"
 FAILED_LOGOUT_PATH = BASE_DIR / "failed_logouts.json"
 CONFIG_PATH        = BASE_DIR / "config.json"
+STORE_DB_PATH      = BASE_DIR / "store.sqlite"
 
 # ── Config JSON ───────────────────────────────────────────────────────────────
 def load_config() -> dict:
@@ -283,6 +284,62 @@ def db_set_2fa(phone, val):
     with sqlite3.connect(DB_PATH) as c:
         c.execute("UPDATE accounts SET has_2fa=? WHERE phone=?", (int(val), phone))
 
+@contextmanager
+def store_connection():
+    connection = sqlite3.connect(STORE_DB_PATH, timeout=20)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys=ON")
+    try:
+        yield connection
+    finally:
+        connection.close()
+
+def init_store_db():
+    with store_connection() as c:
+        c.executescript("""
+            CREATE TABLE IF NOT EXISTS customers (
+                email TEXT PRIMARY KEY,
+                password_salt TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                balance_credits INTEGER NOT NULL DEFAULT 0 CHECK(balance_credits >= 0),
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS store_products (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                category TEXT NOT NULL DEFAULT '',
+                description TEXT NOT NULL DEFAULT '',
+                price_credits INTEGER NOT NULL CHECK(price_credits >= 0),
+                stock INTEGER NOT NULL CHECK(stock >= 0),
+                per_user_limit INTEGER NOT NULL CHECK(per_user_limit > 0),
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS store_purchases (
+                id TEXT PRIMARY KEY,
+                customer_email TEXT NOT NULL REFERENCES customers(email),
+                product_id INTEGER REFERENCES store_products(id),
+                product_name TEXT NOT NULL,
+                quantity INTEGER NOT NULL CHECK(quantity > 0),
+                unit_price_credits INTEGER NOT NULL CHECK(unit_price_credits >= 0),
+                total_credits INTEGER NOT NULL CHECK(total_credits >= 0),
+                purchased_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS store_wallet_ledger (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                customer_email TEXT NOT NULL REFERENCES customers(email),
+                purchase_id TEXT UNIQUE REFERENCES store_purchases(id),
+                amount_credits INTEGER NOT NULL,
+                balance_after_credits INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_store_products_active
+                ON store_products(active, stock);
+            CREATE INDEX IF NOT EXISTS idx_store_purchases_customer
+                ON store_purchases(customer_email, purchased_at);
+        """)
+
 # ── Session helpers ───────────────────────────────────────────────────────────
 def phone_safe(phone: str) -> str:
     return re.sub(r"[^a-zA-Z0-9]", "_", phone)
@@ -301,6 +358,7 @@ _upload_jobs: dict = {}
 @asynccontextmanager
 async def lifespan(app):
     init_db()
+    init_store_db()
     yield
     for d in list(_pending.values()):
         try: await d["client"].disconnect()
@@ -346,7 +404,10 @@ def read_session_token(token: Optional[str]) -> Optional[dict]:
 @app.middleware("http")
 async def enforce_api_session(request: Request, call_next):
     path = request.url.path
-    public_paths = {"/api/healthz", "/api/auth/login", "/api/auth/session", "/api/auth/logout"}
+    public_paths = {
+        "/api/healthz", "/api/auth/login", "/api/auth/register",
+        "/api/auth/session", "/api/auth/logout",
+    }
     if not path.startswith("/api/") or path in public_paths:
         return await call_next(request)
 
@@ -356,11 +417,15 @@ async def enforce_api_session(request: Request, call_next):
 
     admin_only = (
         path.startswith("/api/admin/") or
+        path.startswith("/api/store/admin/") or
         path == "/api/telegram/accounts" or
         path in {"/api/telegram/start-bot-all", "/api/telegram/join-all"}
     )
     if admin_only and session["role"] != "admin":
         return JSONResponse(status_code=403, content={"detail": "Admin access required"})
+
+    if session["role"] != "admin" and not path.startswith("/api/store/"):
+        return JSONResponse(status_code=403, content={"detail": "Customer accounts can only access the store"})
 
     if path.startswith("/api/telegram/accounts/") and session["role"] != "admin":
         from urllib.parse import unquote
@@ -425,6 +490,18 @@ class AuthLoginBody(BaseModel):
     username: str
     password: Optional[str] = None
 
+class RegisterBody(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=10, max_length=256)
+
+class StoreProductBody(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    category: str = Field(default="", max_length=60)
+    description: str = Field(default="", max_length=1000)
+    price_credits: int = Field(ge=0, le=1000000000)
+    stock: int = Field(ge=0, le=1000000)
+    per_user_limit: int = Field(ge=1, le=1000000)
+
 class CreateUserBody(BaseModel):
     username: str
 
@@ -441,31 +518,88 @@ class BulkDisable2faBody(BaseModel):
     phones: List[str]
     password: Optional[str] = None
 
-# ── Auth ──────────────────────────────────────────────────────────────────────
-@app.post("/api/auth/login")
-async def auth_login(body: AuthLoginBody, response: Response):
-    u = body.username.strip()
-    if not u:
-        raise HTTPException(400, "Username required")
-    role = "admin" if u.lower() == ADMIN_USERNAME.lower() else "user"
-    if role == "admin":
-        expected_password = os.getenv("ADMIN_PASSWORD")
-        if not expected_password:
-            raise HTTPException(503, "Admin password is not configured")
-        if not body.password or not hmac.compare_digest(body.password, expected_password):
-            raise HTTPException(401, "Invalid username or password")
-    else:
-        user_ensure(u)
+PASSWORD_HASH_ITERATIONS = 310_000
+
+def normalize_customer_email(email: str) -> str:
+    value = str(email or "").strip().lower()
+    if len(value) > 254 or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", value):
+        raise HTTPException(400, "Enter a valid email address")
+    return value
+
+def password_digest(password: str, salt_hex: Optional[str] = None):
+    salt = bytes.fromhex(salt_hex) if salt_hex else secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), salt, PASSWORD_HASH_ITERATIONS
+    )
+    return salt.hex(), digest.hex()
+
+def verify_customer_password(password: str, salt_hex: str, expected_hex: str) -> bool:
+    try:
+        _, actual_hex = password_digest(password, salt_hex)
+    except (ValueError, TypeError):
+        return False
+    return hmac.compare_digest(actual_hex, expected_hex)
+
+def set_auth_cookie(response: Response, username: str, role: str):
     response.set_cookie(
         key=SESSION_COOKIE,
-        value=create_session_token(u, role),
+        value=create_session_token(username, role),
         max_age=SESSION_MAX_AGE,
         httponly=True,
         secure=True,
         samesite="lax",
         path="/",
     )
-    return {"username": u, "role": role}
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
+@app.post("/api/auth/login")
+async def auth_login(body: AuthLoginBody, response: Response):
+    u = body.username.strip()
+    if not u:
+        raise HTTPException(400, "Email or admin username required")
+    if u.lower() == ADMIN_USERNAME.lower():
+        expected_password = os.getenv("ADMIN_PASSWORD")
+        if not expected_password:
+            raise HTTPException(503, "Admin password is not configured")
+        if not body.password or not hmac.compare_digest(body.password, expected_password):
+            raise HTTPException(401, "Invalid username or password")
+        set_auth_cookie(response, u, "admin")
+        return {"username": u, "role": "admin"}
+
+    email = normalize_customer_email(u)
+    if not body.password:
+        raise HTTPException(401, "Invalid email or password")
+    with store_connection() as c:
+        customer = c.execute(
+            "SELECT password_salt,password_hash FROM customers WHERE email=?",
+            (email,),
+        ).fetchone()
+    if not customer or not verify_customer_password(
+        body.password, customer["password_salt"], customer["password_hash"]
+    ):
+        raise HTTPException(401, "Invalid email or password")
+
+    set_auth_cookie(response, email, "user")
+    return {"username": email, "email": email, "role": "user"}
+
+@app.post("/api/auth/register")
+async def auth_register(body: RegisterBody, response: Response):
+    email = normalize_customer_email(body.email)
+    if len(body.password) < 10:
+        raise HTTPException(400, "Password must be at least 10 characters")
+    salt, digest = password_digest(body.password)
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        with store_connection() as c:
+            c.execute(
+                "INSERT INTO customers(email,password_salt,password_hash,created_at) VALUES(?,?,?,?)",
+                (email, salt, digest, now),
+            )
+    except sqlite3.IntegrityError:
+        raise HTTPException(409, "An account with this email already exists")
+
+    set_auth_cookie(response, email, "user")
+    return {"username": email, "email": email, "role": "user"}
 
 @app.get("/api/auth/session")
 async def auth_session(request: Request):
@@ -478,6 +612,184 @@ async def auth_session(request: Request):
 async def auth_logout(response: Response):
     response.delete_cookie(SESSION_COOKIE, path="/", httponly=True, secure=True, samesite="lax")
     return {"success": True}
+
+# ── Safe product store ────────────────────────────────────────────────────────
+class StorePurchaseBody(BaseModel):
+    product_id: int = Field(gt=0)
+
+def serialize_store_product(row):
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "category": row["category"],
+        "description": row["description"],
+        "price_credits": row["price_credits"],
+        "stock": row["stock"],
+        "per_user_limit": row["per_user_limit"],
+        "active": bool(row["active"]),
+        "sold_count": row["sold_count"] if "sold_count" in row.keys() else 0,
+    }
+
+@app.get("/api/store/me")
+async def store_me(request: Request):
+    session = read_session_token(request.cookies.get(SESSION_COOKIE))
+    email = normalize_customer_email(session["username"])
+    with store_connection() as c:
+        customer = c.execute(
+            "SELECT email,balance_credits,created_at FROM customers WHERE email=?",
+            (email,),
+        ).fetchone()
+    if not customer:
+        raise HTTPException(404, "Customer account not found")
+    return dict(customer)
+
+@app.get("/api/store/products")
+async def store_products():
+    with store_connection() as c:
+        rows = c.execute(
+            """SELECT p.*, COALESCE(SUM(o.quantity),0) AS sold_count
+               FROM store_products p
+               LEFT JOIN store_purchases o ON o.product_id=p.id
+               WHERE p.active=1 AND p.stock>0
+               GROUP BY p.id ORDER BY p.created_at DESC, p.id DESC"""
+        ).fetchall()
+    return [serialize_store_product(row) for row in rows]
+
+@app.get("/api/store/purchases")
+async def store_customer_purchases(request: Request):
+    session = read_session_token(request.cookies.get(SESSION_COOKIE))
+    email = normalize_customer_email(session["username"])
+    with store_connection() as c:
+        rows = c.execute(
+            """SELECT id,product_name,quantity,unit_price_credits,total_credits,purchased_at
+               FROM store_purchases WHERE customer_email=?
+               ORDER BY purchased_at DESC""",
+            (email,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+@app.post("/api/store/purchases")
+async def store_purchase(body: StorePurchaseBody, request: Request):
+    session = read_session_token(request.cookies.get(SESSION_COOKIE))
+    email = normalize_customer_email(session["username"])
+    now = datetime.now(timezone.utc).isoformat()
+    receipt_id = uuid4().hex
+    with store_connection() as c:
+        c.execute("BEGIN IMMEDIATE")
+        product = c.execute(
+            "SELECT * FROM store_products WHERE id=? AND active=1",
+            (body.product_id,),
+        ).fetchone()
+        if not product or product["stock"] < 1:
+            raise HTTPException(404, "This product is no longer available")
+        customer = c.execute(
+            "SELECT balance_credits FROM customers WHERE email=?",
+            (email,),
+        ).fetchone()
+        if not customer:
+            raise HTTPException(404, "Customer account not found")
+        bought = c.execute(
+            "SELECT COALESCE(SUM(quantity),0) FROM store_purchases WHERE customer_email=? AND product_id=?",
+            (email, body.product_id),
+        ).fetchone()[0]
+        if bought >= product["per_user_limit"]:
+            raise HTTPException(409, "You have reached this product's purchase limit")
+        total = product["price_credits"]
+        balance = customer["balance_credits"]
+        if balance < total:
+            raise HTTPException(402, "Not enough credits. Balance top-up is not available yet.")
+        changed = c.execute(
+            "UPDATE store_products SET stock=stock-1,updated_at=? WHERE id=? AND stock>0",
+            (now, body.product_id),
+        ).rowcount
+        if changed != 1:
+            raise HTTPException(409, "This product just sold out")
+        new_balance = balance - total
+        c.execute(
+            "UPDATE customers SET balance_credits=? WHERE email=?",
+            (new_balance, email),
+        )
+        c.execute(
+            """INSERT INTO store_purchases
+               (id,customer_email,product_id,product_name,quantity,unit_price_credits,total_credits,purchased_at)
+               VALUES(?,?,?,?,1,?,?,?)""",
+            (receipt_id, email, body.product_id, product["name"], total, total, now),
+        )
+        if total:
+            c.execute(
+                """INSERT INTO store_wallet_ledger
+                   (customer_email,purchase_id,amount_credits,balance_after_credits,created_at)
+                   VALUES(?,?,?,?,?)""",
+                (email, receipt_id, -total, new_balance, now),
+            )
+        c.commit()
+        return {
+            "receipt_id": receipt_id,
+            "product_name": product["name"],
+            "quantity": 1,
+            "unit_price_credits": total,
+            "total_credits": total,
+            "balance_credits": new_balance,
+            "purchased_at": now,
+        }
+
+@app.get("/api/store/admin/products")
+async def store_admin_products():
+    with store_connection() as c:
+        rows = c.execute(
+            """SELECT p.*, COALESCE(SUM(o.quantity),0) AS sold_count
+               FROM store_products p
+               LEFT JOIN store_purchases o ON o.product_id=p.id
+               GROUP BY p.id ORDER BY p.created_at DESC, p.id DESC"""
+        ).fetchall()
+    return [serialize_store_product(row) for row in rows]
+
+@app.post("/api/store/admin/products")
+async def store_admin_create_product(body: StoreProductBody):
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(400, "Product name is required")
+    now = datetime.now(timezone.utc).isoformat()
+    with store_connection() as c:
+        cursor = c.execute(
+            """INSERT INTO store_products
+               (name,category,description,price_credits,stock,per_user_limit,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?,?)""",
+            (name, body.category.strip(), body.description.strip(), body.price_credits,
+             body.stock, body.per_user_limit, now, now),
+        )
+        product_id = cursor.lastrowid
+    return {"success": True, "id": product_id}
+
+@app.put("/api/store/admin/products/{product_id}")
+async def store_admin_update_product(product_id: int, body: StoreProductBody):
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(400, "Product name is required")
+    now = datetime.now(timezone.utc).isoformat()
+    with store_connection() as c:
+        changed = c.execute(
+            """UPDATE store_products
+               SET name=?,category=?,description=?,price_credits=?,stock=?,
+                   per_user_limit=?,updated_at=?
+               WHERE id=?""",
+            (name, body.category.strip(), body.description.strip(), body.price_credits,
+             body.stock, body.per_user_limit, now, product_id),
+        ).rowcount
+    if not changed:
+        raise HTTPException(404, "Product not found")
+    return {"success": True}
+
+@app.delete("/api/store/admin/products/{product_id}")
+async def store_admin_deactivate_product(product_id: int):
+    with store_connection() as c:
+        changed = c.execute(
+            "UPDATE store_products SET active=0,updated_at=? WHERE id=?",
+            (datetime.now(timezone.utc).isoformat(), product_id),
+        ).rowcount
+    if not changed:
+        raise HTTPException(404, "Product not found")
+    return {"success": True, "active": False}
 
 # ── Healthcheck ───────────────────────────────────────────────────────────────
 @app.get("/api/healthz")
