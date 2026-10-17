@@ -618,6 +618,11 @@ select.input option { background: var(--bg3); }
   max-height: 280px; overflow: auto; border: 1px solid var(--border);
   border-radius: 9px; padding: 6px; background: var(--bg2);
 }
+.assign-search-group { margin-bottom: 8px; }
+.assign-number-count {
+  margin: -4px 2px 8px; color: var(--text-dim); font-size: 11px;
+  text-align: right;
+}
 .assign-number-option,
 .assigned-admin-row,
 .user-assigned-account {
@@ -626,6 +631,7 @@ select.input option { background: var(--bg3); }
 .assign-number-option {
   padding: 9px 8px; border-bottom: 1px solid var(--border); cursor: pointer;
 }
+.assign-number-option:hover { background: var(--glass); }
 .assign-number-option:last-child { border-bottom: 0; }
 .assign-number-option input { accent-color: var(--accent); flex-shrink: 0; }
 .assigned-phone { font-family: var(--mono); font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
