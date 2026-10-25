@@ -11,6 +11,7 @@ const state = {
   loginData: {},
   role: null,
   username: null,
+  countryRegions: new Map(),
   userSellData: {},
   userSellStep: 1,
   selectMode: false,
@@ -210,6 +211,18 @@ function normalizePhone(phone) {
 
 function getCountryInfo(phone) {
   const digits = normalizePhone(phone);
+  const regionCode = String(state.countryRegions.get(digits) || '').toUpperCase();
+  if (regionCode && /^[A-Z]{2}$/.test(regionCode) && regionCode !== 'ZZ') {
+    try {
+      const name = new Intl.DisplayNames(['en'], { type: 'region' }).of(regionCode);
+      if (name && name !== regionCode) {
+        const flag = String.fromCodePoint(
+          ...regionCode.split('').map(char => 127397 + char.charCodeAt(0)),
+        );
+        return { prefix: '', name, flag };
+      }
+    } catch (_) {}
+  }
   if (digits.startsWith('1')) {
     const areaCode = digits.slice(1, 4);
     const nanpMatch = NANP_AREA_CODES.find(([prefix]) => areaCode === prefix);
@@ -725,12 +738,18 @@ async function loadAccounts() {
   try {
     const accounts = await get('/telegram/accounts');
     state.accounts = Array.isArray(accounts) ? accounts : [];
+    state.countryRegions = new Map(
+      state.accounts
+        .filter(account => account.countryCode)
+        .map(account => [normalizePhone(account.phone), account.countryCode]),
+    );
     const accountPhones = new Set(state.accounts.map(accountPhone).filter(Boolean));
     state.selectedPhones = new Set(
       [...state.selectedPhones].filter(phone => accountPhones.has(phone)),
     );
     updateStats();
     renderAccounts(state.accounts);
+    if (state.role === 'admin') loadSessionCounts();
     updateBulkBar();
     if (['botrefer', 'sessiondl', 'more', 'sendmsg', 'joinchannel'].includes(state.currentPage)) {
       populateAccountSelects();
@@ -863,6 +882,12 @@ function renderAccounts(accounts) {
     const phone = accountPhone(a);
     const isSelected = state.selectedPhones.has(phone);
     const country = getCountryInfo(a.phone);
+    const sessionStatus = state.sessionCounts[phone];
+    const sessionBadge = sessionStatus?.frozen
+      ? '<span class="badge badge-frozen">Frozen</span>'
+      : Number.isInteger(sessionStatus?.count)
+        ? `<span class="badge badge-device" aria-label="${sessionStatus.count} connected devices">📱 ${sessionStatus.count}</span>`
+        : '';
     const clickFn = state.selectMode
       ? `toggleSelectPhone('${esc(phone)}')`
       : `navigate('detail','${esc(phone)}')`;
@@ -885,9 +910,7 @@ function renderAccounts(accounts) {
               ${a.username ? `<span class="badge badge-blue">@${esc(a.username)}</span>` : ''}
               ${a.has2fa ? `<span class="badge badge-yellow">2FA ON</span>` : `<span class="badge badge-green">2FA OFF</span>`}
               ${loginDuration ? `<span class="badge badge-dim">⏱ ${loginDuration}</span>` : '<span class="badge badge-green">Active</span>'}
-              ${state.sessionCounts[a.phone] != null
-                ? `<span class="badge" style="background:rgba(123,97,255,.18);color:#b39dff;border:1px solid rgba(123,97,255,.3)">📱 ${state.sessionCounts[a.phone]}</span>`
-                : ''}
+              ${sessionBadge}
             </div>
           </div>
         </div>
@@ -1893,11 +1916,22 @@ async function terminateSession(hash) {
 
 async function terminateAllSessions() {
   const btn = document.getElementById('btn-terminate-all');
+  const phone = state.detail;
+  if (!phone) return;
+  const count = state.sessionCounts[phone]?.count;
+  if (Number.isInteger(count) && count <= 1) {
+    return toast('No other sessions to log out', 'info');
+  }
+  const otherSessions = Number.isInteger(count)
+    ? `${Math.max(count - 1, 0)} other session(s) will be logged out.`
+    : 'All other sessions will be logged out.';
+  if (!confirm(`Log out other devices for ${phone}? ${otherSessions} This panel's current session will remain active.`)) return;
   setLoading(btn, true);
   try {
-    await post(`/telegram/accounts/${encodeURIComponent(state.detail)}/terminate-all-sessions`, {});
-    toast('All other sessions terminated', 'success');
+    await post(`/telegram/accounts/${encodeURIComponent(phone)}/terminate-all-sessions`, {});
+    toast('Other sessions logged out', 'success');
     loadSessions();
+    loadSessionCounts();
   } catch (e) { toast('Error: ' + e.message, 'error'); }
   setLoading(btn, false);
 }

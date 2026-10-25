@@ -10,11 +10,13 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 import uvicorn
+import phonenumbers
 
 from telethon import TelegramClient
 from telethon.errors import (
     PhoneCodeInvalidError, PhoneCodeExpiredError,
     SessionPasswordNeededError, PasswordHashInvalidError, FloodWaitError,
+    FrozenMethodInvalidError,
 )
 from telethon.tl.functions.account import (
     GetPasswordRequest, GetAuthorizationsRequest,
@@ -220,6 +222,19 @@ def init_db():
         except Exception:
             pass
 
+def phone_country_code(phone: str) -> Optional[str]:
+    digits = re.sub(r"\D", "", str(phone or ""))
+    if digits.startswith("00"):
+        digits = digits[2:]
+    if not digits:
+        return None
+    try:
+        parsed = phonenumbers.parse(f"+{digits}", None)
+        region = phonenumbers.region_code_for_number(parsed)
+    except phonenumbers.NumberParseException:
+        return None
+    return region if region and region not in {"ZZ", "001"} else None
+
 def db_all():
     with sqlite3.connect(DB_PATH) as c:
         rows = c.execute(
@@ -228,7 +243,7 @@ def db_all():
     return [
         {"phone": r[0], "firstName": r[1], "lastName": r[2],
          "username": r[3], "id": r[4], "has2fa": bool(r[5]),
-         "loggedInAt": r[6]}
+         "loggedInAt": r[6], "countryCode": phone_country_code(r[0])}
         for r in rows
     ]
 
@@ -1361,9 +1376,14 @@ async def session_counts():
             try:
                 await client.connect()
                 r = await client(GetAuthorizationsRequest())
-                result[phone] = len(r.authorizations)
+                result[phone] = {
+                    "count": len(r.authorizations),
+                    "frozen": False,
+                }
+            except FrozenMethodInvalidError:
+                result[phone] = {"count": None, "frozen": True}
             except Exception:
-                result[phone] = None
+                result[phone] = {"count": None, "frozen": False}
             finally:
                 try: await client.disconnect()
                 except: pass
