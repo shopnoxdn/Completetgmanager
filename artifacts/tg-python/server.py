@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Optional, List
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
@@ -16,6 +17,7 @@ from telethon import TelegramClient
 from telethon.errors import (
     PhoneCodeInvalidError, PhoneCodeExpiredError,
     SessionPasswordNeededError, PasswordHashInvalidError, FloodWaitError,
+    AuthKeyNotFound, AuthKeyUnregisteredError,
     FrozenMethodInvalidError,
 )
 from telethon.tl.functions.account import (
@@ -316,7 +318,7 @@ def init_store_db():
                 email TEXT PRIMARY KEY,
                 password_salt TEXT NOT NULL,
                 password_hash TEXT NOT NULL,
-                balance_credits INTEGER NOT NULL DEFAULT 0 CHECK(balance_credits >= 0),
+                balance_credits REAL NOT NULL DEFAULT 0 CHECK(balance_credits >= 0),
                 created_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS store_products (
@@ -324,7 +326,7 @@ def init_store_db():
                 name TEXT NOT NULL,
                 category TEXT NOT NULL DEFAULT '',
                 description TEXT NOT NULL DEFAULT '',
-                price_credits INTEGER NOT NULL CHECK(price_credits >= 0),
+                price_credits REAL NOT NULL CHECK(price_credits >= 0),
                 stock INTEGER NOT NULL CHECK(stock >= 0),
                 per_user_limit INTEGER NOT NULL CHECK(per_user_limit > 0),
                 active INTEGER NOT NULL DEFAULT 1,
@@ -337,16 +339,16 @@ def init_store_db():
                 product_id INTEGER REFERENCES store_products(id),
                 product_name TEXT NOT NULL,
                 quantity INTEGER NOT NULL CHECK(quantity > 0),
-                unit_price_credits INTEGER NOT NULL CHECK(unit_price_credits >= 0),
-                total_credits INTEGER NOT NULL CHECK(total_credits >= 0),
+                unit_price_credits REAL NOT NULL CHECK(unit_price_credits >= 0),
+                total_credits REAL NOT NULL CHECK(total_credits >= 0),
                 purchased_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS store_wallet_ledger (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 customer_email TEXT NOT NULL REFERENCES customers(email),
                 purchase_id TEXT UNIQUE REFERENCES store_purchases(id),
-                amount_credits INTEGER NOT NULL,
-                balance_after_credits INTEGER NOT NULL,
+                amount_credits REAL NOT NULL,
+                balance_after_credits REAL NOT NULL,
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_store_products_active
@@ -509,11 +511,31 @@ class RegisterBody(BaseModel):
     email: str = Field(min_length=3, max_length=254)
     password: str = Field(min_length=10, max_length=256)
 
+STORE_CREDIT_QUANTUM = Decimal("0.01")
+
+def normalize_credit_amount(value) -> Decimal:
+    try:
+        amount = Decimal(str(value))
+        if not amount.is_finite() or amount < 0:
+            raise InvalidOperation
+        normalized = amount.quantize(STORE_CREDIT_QUANTUM)
+    except (InvalidOperation, TypeError, ValueError):
+        raise HTTPException(422, "Enter a valid non-negative credit amount")
+    if normalized != amount:
+        raise HTTPException(422, "Credit amounts support up to 2 decimal places")
+    return normalized
+
+def credit_amount_json(value) -> float:
+    return float(normalize_credit_amount(value))
+
+def credit_amount_sql(value) -> str:
+    return format(normalize_credit_amount(value), "f")
+
 class StoreProductBody(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     category: str = Field(default="", max_length=60)
     description: str = Field(default="", max_length=1000)
-    price_credits: int = Field(ge=0, le=1000000000)
+    price_credits: Decimal = Field(ge=Decimal("0"), le=Decimal("1000000000"))
     stock: int = Field(ge=0, le=1000000)
     per_user_limit: int = Field(ge=1, le=1000000)
 
@@ -632,13 +654,16 @@ async def auth_logout(response: Response):
 class StorePurchaseBody(BaseModel):
     product_id: int = Field(gt=0)
 
+class BalanceAdjustmentBody(BaseModel):
+    amount_credits: Decimal
+
 def serialize_store_product(row):
     return {
         "id": row["id"],
         "name": row["name"],
         "category": row["category"],
         "description": row["description"],
-        "price_credits": row["price_credits"],
+        "price_credits": credit_amount_json(row["price_credits"]),
         "stock": row["stock"],
         "per_user_limit": row["per_user_limit"],
         "active": bool(row["active"]),
@@ -656,7 +681,11 @@ async def store_me(request: Request):
         ).fetchone()
     if not customer:
         raise HTTPException(404, "Customer account not found")
-    return dict(customer)
+    return {
+        "email": customer["email"],
+        "balance_credits": credit_amount_json(customer["balance_credits"]),
+        "created_at": customer["created_at"],
+    }
 
 @app.get("/api/store/products")
 async def store_products():
@@ -681,7 +710,14 @@ async def store_customer_purchases(request: Request):
                ORDER BY purchased_at DESC""",
             (email,),
         ).fetchall()
-    return [dict(row) for row in rows]
+    return [
+        {
+            **dict(row),
+            "unit_price_credits": credit_amount_json(row["unit_price_credits"]),
+            "total_credits": credit_amount_json(row["total_credits"]),
+        }
+        for row in rows
+    ]
 
 @app.post("/api/store/purchases")
 async def store_purchase(body: StorePurchaseBody, request: Request):
@@ -709,42 +745,48 @@ async def store_purchase(body: StorePurchaseBody, request: Request):
         ).fetchone()[0]
         if bought >= product["per_user_limit"]:
             raise HTTPException(409, "You have reached this product's purchase limit")
-        total = product["price_credits"]
-        balance = customer["balance_credits"]
+        total = normalize_credit_amount(product["price_credits"])
+        balance = normalize_credit_amount(customer["balance_credits"])
         if balance < total:
-            raise HTTPException(402, "Not enough credits. Balance top-up is not available yet.")
+            raise HTTPException(402, "Not enough credits. Contact @SHOPNO_XDN on Telegram to add balance.")
         changed = c.execute(
             "UPDATE store_products SET stock=stock-1,updated_at=? WHERE id=? AND stock>0",
             (now, body.product_id),
         ).rowcount
         if changed != 1:
             raise HTTPException(409, "This product just sold out")
-        new_balance = balance - total
+        new_balance = (balance - total).quantize(STORE_CREDIT_QUANTUM)
         c.execute(
             "UPDATE customers SET balance_credits=? WHERE email=?",
-            (new_balance, email),
+            (credit_amount_sql(new_balance), email),
         )
         c.execute(
             """INSERT INTO store_purchases
                (id,customer_email,product_id,product_name,quantity,unit_price_credits,total_credits,purchased_at)
                VALUES(?,?,?,?,1,?,?,?)""",
-            (receipt_id, email, body.product_id, product["name"], total, total, now),
+            (
+                receipt_id, email, body.product_id, product["name"],
+                credit_amount_sql(total), credit_amount_sql(total), now,
+            ),
         )
         if total:
             c.execute(
                 """INSERT INTO store_wallet_ledger
                    (customer_email,purchase_id,amount_credits,balance_after_credits,created_at)
                    VALUES(?,?,?,?,?)""",
-                (email, receipt_id, -total, new_balance, now),
+                (
+                    email, receipt_id, format(-total, "f"),
+                    credit_amount_sql(new_balance), now,
+                ),
             )
         c.commit()
         return {
             "receipt_id": receipt_id,
             "product_name": product["name"],
             "quantity": 1,
-            "unit_price_credits": total,
-            "total_credits": total,
-            "balance_credits": new_balance,
+            "unit_price_credits": credit_amount_json(total),
+            "total_credits": credit_amount_json(total),
+            "balance_credits": credit_amount_json(new_balance),
             "purchased_at": now,
         }
 
@@ -759,18 +801,70 @@ async def store_admin_products():
         ).fetchall()
     return [serialize_store_product(row) for row in rows]
 
+@app.get("/api/store/admin/customers")
+async def store_admin_customers():
+    with store_connection() as c:
+        rows = c.execute(
+            "SELECT email, balance_credits, created_at FROM customers ORDER BY email"
+        ).fetchall()
+    return [
+        {
+            "email": row["email"],
+            "balance_credits": credit_amount_json(row["balance_credits"]),
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    ]
+
+@app.post("/api/store/admin/customers/{email}/balance")
+async def store_admin_credit_customer(email: str, body: BalanceAdjustmentBody):
+    email = normalize_customer_email(email)
+    amount = normalize_credit_amount(body.amount_credits)
+    if amount <= 0:
+        raise HTTPException(422, "Credit amount must be greater than zero")
+    now = datetime.now(timezone.utc).isoformat()
+    with store_connection() as c:
+        c.execute("BEGIN IMMEDIATE")
+        customer = c.execute(
+            "SELECT balance_credits FROM customers WHERE email=?", (email,)
+        ).fetchone()
+        if not customer:
+            c.rollback()
+            raise HTTPException(404, "Customer not found")
+        new_balance = (
+            normalize_credit_amount(customer["balance_credits"]) + amount
+        ).quantize(STORE_CREDIT_QUANTUM)
+        c.execute(
+            "UPDATE customers SET balance_credits=? WHERE email=?",
+            (credit_amount_sql(new_balance), email),
+        )
+        c.execute(
+            """INSERT INTO store_wallet_ledger
+               (customer_email, purchase_id, amount_credits, balance_after_credits, created_at)
+               VALUES (?, NULL, ?, ?, ?)""",
+            (email, credit_amount_sql(amount), credit_amount_sql(new_balance), now),
+        )
+        c.commit()
+    return {
+        "success": True,
+        "email": email,
+        "credited_credits": credit_amount_json(amount),
+        "balance_credits": credit_amount_json(new_balance),
+    }
+
 @app.post("/api/store/admin/products")
 async def store_admin_create_product(body: StoreProductBody):
     name = body.name.strip()
     if not name:
         raise HTTPException(400, "Product name is required")
+    price = normalize_credit_amount(body.price_credits)
     now = datetime.now(timezone.utc).isoformat()
     with store_connection() as c:
         cursor = c.execute(
             """INSERT INTO store_products
                (name,category,description,price_credits,stock,per_user_limit,created_at,updated_at)
                VALUES(?,?,?,?,?,?,?,?)""",
-            (name, body.category.strip(), body.description.strip(), body.price_credits,
+            (name, body.category.strip(), body.description.strip(), credit_amount_sql(price),
              body.stock, body.per_user_limit, now, now),
         )
         product_id = cursor.lastrowid
@@ -781,6 +875,7 @@ async def store_admin_update_product(product_id: int, body: StoreProductBody):
     name = body.name.strip()
     if not name:
         raise HTTPException(400, "Product name is required")
+    price = normalize_credit_amount(body.price_credits)
     now = datetime.now(timezone.utc).isoformat()
     with store_connection() as c:
         changed = c.execute(
@@ -788,7 +883,7 @@ async def store_admin_update_product(product_id: int, body: StoreProductBody):
                SET name=?,category=?,description=?,price_credits=?,stock=?,
                    per_user_limit=?,updated_at=?
                WHERE id=?""",
-            (name, body.category.strip(), body.description.strip(), body.price_credits,
+            (name, body.category.strip(), body.description.strip(), credit_amount_sql(price),
              body.stock, body.per_user_limit, now, product_id),
         ).rowcount
     if not changed:
@@ -1200,6 +1295,11 @@ async def get_login_code(phone: str):
                         "date": msg.date.isoformat() if msg.date else None,
                     }
         return {"found": False, "code": None}
+    except (AuthKeyNotFound, AuthKeyUnregisteredError):
+        raise HTTPException(
+            409,
+            "Telegram no longer recognizes this session. Use + Add to sign in to this number again; the saved session will be replaced only after sign-in succeeds.",
+        )
     except Exception as e:
         raise HTTPException(500, str(e))
     finally:
@@ -1229,6 +1329,11 @@ async def get_sessions(phone: str):
             }
             for a in result.authorizations
         ]
+    except (AuthKeyNotFound, AuthKeyUnregisteredError):
+        raise HTTPException(
+            409,
+            "Telegram no longer recognizes this session. Use + Add to sign in to this number again; the saved session will be replaced only after sign-in succeeds.",
+        )
     except Exception as e:
         raise HTTPException(500, str(e))
     finally:

@@ -225,7 +225,7 @@
               <div class="grid-2">
                 <div class="input-group">
                   <label class="input-label" for="store-product-name">Product name</label>
-                  <input class="input" id="store-product-name" maxlength="100" placeholder="Product name"/>
+                  <input class="input" id="store-product-name" maxlength="100" placeholder="Product name (required)" required aria-required="true"/>
                 </div>
                 <div class="input-group">
                   <label class="input-label" for="store-product-category">Category</label>
@@ -238,8 +238,8 @@
               </div>
               <div class="grid-3">
                 <div class="input-group">
-                  <label class="input-label" for="store-product-price">Price (credits)</label>
-                  <input class="input" id="store-product-price" type="number" min="0" step="1" value="0"/>
+                  <label class="input-label" for="store-product-price">Price (credits, up to 2 decimal places)</label>
+                  <input class="input" id="store-product-price" type="number" min="0" max="1000000000" step="0.01" value="0"/>
                 </div>
                 <div class="input-group">
                   <label class="input-label" for="store-product-stock">Stock</label>
@@ -257,6 +257,16 @@
             </div>
             <div class="text-dim text-sm mb-3">Product catalog only. Do not list or deliver passwords, OTPs, session files, or private account data.</div>
             <div id="store-admin-products"><div class="empty-state"><p>Loading...</p></div></div>
+          </div>
+          <div class="card mb-4">
+            <div class="card-header">
+              <div>
+                <div class="card-title">Customer Balances</div>
+                <div class="text-dim text-sm">Add credits after confirming the top-up through Telegram.</div>
+              </div>
+              <button class="btn btn-secondary btn-sm" type="button" onclick="loadStoreAdminCustomers()">Refresh</button>
+            </div>
+            <div id="store-admin-customers"><div class="empty-state"><p>Loading customers…</p></div></div>
           </div>
         </div>
 
@@ -664,11 +674,12 @@
     </div>
     <div class="user-content">
       <div class="card store-wallet-card">
-        <div>
+        <div class="store-wallet-details">
           <div class="text-dim text-sm">Available balance</div>
           <div class="store-balance"><span id="store-customer-balance">0</span> credits</div>
-          <div class="text-dim text-sm">Balance top-up will be added later.</div>
+          <div class="text-dim text-sm">To add balance, contact @SHOPNO_XDN on Telegram.</div>
         </div>
+        <a class="btn btn-primary store-topup-link" href="https://t.me/SHOPNO_XDN?text=Hi%2C%20I%20want%20to%20add%20balance" target="_blank" rel="noopener noreferrer">Add balance on Telegram</a>
       </div>
       <div class="user-nav">
         <button class="user-nav-btn active" id="unav-shop" onclick="storeNavigate('shop')">Buy Products</button>
@@ -804,6 +815,6 @@
   </div>
 </div>
 
-<script src="/script.js?v=account-status-country-v1"></script>
+<script src="/script.js?v=store-decimals-wallet-v1"></script>
 </body>
 </html>

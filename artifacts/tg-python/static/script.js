@@ -450,7 +450,10 @@ function navigate(page, data) {
   if (page !== 'dashboard') exitSelectMode();
   if (page === 'detail' && state.detail) loadDetail(state.detail);
   if (page === 'dashboard') { loadAccounts(); loadFailedLogouts(); }
-  if (page === 'catalog') loadStoreAdminProducts();
+  if (page === 'catalog') {
+    loadStoreAdminProducts();
+    loadStoreAdminCustomers();
+  }
   if (page === 'adminusers') loadAdminUsers();
   if (page === 'botrefer') { populateAccountSelects(); updateBotAllCount(); }
   if (page === 'sessiondl') { populateAccountSelects(); updateDlCount(); }
@@ -487,12 +490,24 @@ function storeNavigate(page) {
   loadStoreProfile();
 }
 
+function formatCredits(value) {
+  const amount = Number(value);
+  return Number.isFinite(amount)
+    ? amount.toLocaleString(undefined, { maximumFractionDigits: 2 })
+    : '0';
+}
+
+function creditsToMinorUnits(value) {
+  const amount = Number(value);
+  return Number.isFinite(amount) ? Math.round(amount * 100) : NaN;
+}
+
 async function loadStoreProfile() {
   try {
     const profile = await get('/store/me');
     state.storeBalance = Number(profile.balance_credits) || 0;
     const balance = document.getElementById('store-customer-balance');
-    if (balance) balance.textContent = state.storeBalance.toLocaleString();
+    if (balance) balance.textContent = formatCredits(state.storeBalance);
     renderStoreProducts();
   } catch (e) {
     toast('Could not load your balance: ' + e.message, 'error');
@@ -519,14 +534,14 @@ function renderStoreProducts() {
     return;
   }
   el.innerHTML = state.storeProducts.map(product => {
-    const enoughCredits = state.storeBalance >= Number(product.price_credits);
+    const enoughCredits = creditsToMinorUnits(state.storeBalance) >= creditsToMinorUnits(product.price_credits);
     return `
       <article class="store-product-card">
         <div class="store-product-category">${esc(product.category || 'Product')}</div>
         <h3>${esc(product.name)}</h3>
         <p>${esc(product.description || 'No description provided.')}</p>
         <div class="store-product-meta">
-          <span>${Number(product.price_credits).toLocaleString()} credits</span>
+          <span>${formatCredits(product.price_credits)} credits</span>
           <span>${Number(product.stock)} in stock</span>
           <span>Limit ${Number(product.per_user_limit)} per user</span>
         </div>
@@ -575,7 +590,7 @@ async function loadStorePurchases() {
         <div class="store-receipt-meta">
           <span>Receipt ${esc(receipt.id.slice(0, 12))}</span>
           <span>Qty ${Number(receipt.quantity)}</span>
-          <strong>${Number(receipt.total_credits).toLocaleString()} credits</strong>
+          <strong>${formatCredits(receipt.total_credits)} credits</strong>
         </div>
       </article>`).join('');
   } catch (e) {
@@ -600,7 +615,7 @@ async function loadStoreAdminProducts() {
           <article class="store-admin-product ${product.active ? '' : 'is-inactive'}">
             <div class="store-admin-product-info">
               <strong>${esc(product.name)}</strong>
-              <span class="text-dim text-sm">${esc(product.category || 'Uncategorized')} · ${Number(product.price_credits).toLocaleString()} credits</span>
+              <span class="text-dim text-sm">${esc(product.category || 'Uncategorized')} · ${formatCredits(product.price_credits)} credits</span>
               <span class="text-dim text-sm">Stock ${Number(product.stock)} · Sold ${Number(product.sold_count)} · Limit ${Number(product.per_user_limit)} per user</span>
               <span class="badge ${product.active ? 'badge-green' : 'badge-dim'}">${product.active ? 'Active' : 'Removed'}</span>
             </div>
@@ -618,6 +633,61 @@ async function loadStoreAdminProducts() {
     });
   } catch (e) {
     el.innerHTML = `<div class="empty-state"><p style="color:var(--danger)">${esc(e.message)}</p></div>`;
+  }
+}
+
+async function loadStoreAdminCustomers() {
+  const el = document.getElementById('store-admin-customers');
+  if (!el) return;
+  el.innerHTML = '<div class="empty-state"><p>Loading customers…</p></div>';
+  try {
+    const customers = await get('/store/admin/customers');
+    if (!customers.length) {
+      el.innerHTML = '<div class="empty-state"><p>No customer accounts yet.</p></div>';
+      return;
+    }
+    el.innerHTML = `
+      <div class="store-admin-list">
+        ${customers.map(customer => `
+          <article class="store-admin-product">
+            <div class="store-admin-product-info">
+              <strong>${esc(customer.email)}</strong>
+              <span class="text-dim text-sm">Balance: ${formatCredits(customer.balance_credits)} credits</span>
+            </div>
+            <div class="store-admin-credit-controls">
+              <input class="input" type="number" min="0.01" max="1000000000" step="0.01"
+                placeholder="Credits" aria-label="Credits to add for ${esc(customer.email)}">
+              <button class="btn btn-primary btn-sm store-add-customer-balance"
+                type="button" data-customer-email="${esc(customer.email)}">Add credits</button>
+            </div>
+          </article>`).join('')}
+      </div>`;
+    el.querySelectorAll('.store-add-customer-balance').forEach(button => {
+      button.addEventListener('click', () => addStoreCustomerBalance(button.dataset.customerEmail, button));
+    });
+  } catch (e) {
+    el.innerHTML = `<div class="empty-state"><p style="color:var(--danger)">${esc(e.message)}</p></div>`;
+  }
+}
+
+async function addStoreCustomerBalance(email, button) {
+  const row = button.closest('.store-admin-product');
+  const amountInput = row?.querySelector('input[type="number"]');
+  const amount = Number(amountInput?.value);
+  const cents = Math.round(amount * 100);
+  if (!Number.isFinite(amount) || amount <= 0 || amount > 1000000000 ||
+      Math.abs(amount * 100 - cents) > 1e-7) {
+    return toast('Enter a positive amount with up to 2 decimal places', 'warn');
+  }
+  if (!confirm(`Add ${formatCredits(amount)} credits to ${email}? Confirm the Telegram top-up first.`)) return;
+  try {
+    await post(`/store/admin/customers/${encodeURIComponent(email)}/balance`, {
+      amount_credits: amount,
+    });
+    toast('Customer balance updated', 'success');
+    await loadStoreAdminCustomers();
+  } catch (e) {
+    toast('Error: ' + e.message, 'error');
   }
 }
 
@@ -649,19 +719,35 @@ function hideStoreProductForm() {
 }
 
 async function saveStoreProduct() {
+  const nameInput = document.getElementById('store-product-name');
+  const priceInput = document.getElementById('store-product-price').value.trim();
   const payload = {
-    name: document.getElementById('store-product-name').value.trim(),
+    name: nameInput.value.trim(),
     category: document.getElementById('store-product-category').value.trim(),
     description: document.getElementById('store-product-description').value.trim(),
-    price_credits: Number(document.getElementById('store-product-price').value),
+    price_credits: priceInput ? Number(priceInput) : NaN,
     stock: Number(document.getElementById('store-product-stock').value),
     per_user_limit: Number(document.getElementById('store-product-limit').value),
   };
-  if (!payload.name) return toast('Enter a product name', 'warn');
-  if (!Object.values(payload).slice(3).every(value => Number.isSafeInteger(value) && value >= 0)) {
-    return toast('Price, stock, and limit must be whole numbers', 'warn');
+  if (!payload.name) {
+    toast('Enter a product name', 'warn');
+    nameInput.focus();
+    nameInput.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    return;
   }
-  if (payload.per_user_limit < 1) return toast('Limit per user must be at least 1', 'warn');
+  const priceMinorUnits = Math.round(payload.price_credits * 100);
+  if (!Number.isFinite(payload.price_credits) ||
+      payload.price_credits < 0 ||
+      payload.price_credits > 1000000000 ||
+      Math.abs(payload.price_credits * 100 - priceMinorUnits) > 1e-7) {
+    return toast('Price must be a non-negative amount with up to 2 decimal places', 'warn');
+  }
+  if (!Number.isSafeInteger(payload.stock) || payload.stock < 0) {
+    return toast('Stock must be a whole number of 0 or more', 'warn');
+  }
+  if (!Number.isSafeInteger(payload.per_user_limit) || payload.per_user_limit < 1) {
+    return toast('Limit per user must be a whole number of at least 1', 'warn');
+  }
   const button = document.getElementById('btn-save-store-product');
   setLoading(button, true);
   try {
