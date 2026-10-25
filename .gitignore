@@ -52,3 +52,8 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+
+# Local Telegram Manager account data
+/artifacts/tg-python/accounts.db
+/artifacts/tg-python/sessions/
+/artifacts/tg-python/store.sqlite
