@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import server
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 
 class StoreCreditTests(unittest.TestCase):
@@ -72,6 +73,15 @@ class StoreCreditTests(unittest.TestCase):
         with self.assertRaises(HTTPException):
             server.normalize_credit_amount("0.251")
 
+    def test_product_price_must_be_at_least_one_cent(self):
+        with self.assertRaises(ValidationError):
+            server.StoreProductBody(
+                name="Free product",
+                price_credits=Decimal("0"),
+                stock=1,
+                per_user_limit=1,
+            )
+
     def test_product_create_accepts_fractional_price(self):
         body = server.StoreProductBody(
             name="Sample product",
@@ -117,11 +127,11 @@ class StoreCreditTests(unittest.TestCase):
         self.assertAlmostEqual(float(ledger_amount), -0.25)
         self.assertAlmostEqual(result["balance_credits"], 0.05)
 
-    def test_admin_balance_credit_is_audited_and_supports_cents(self):
-        body = server.BalanceAdjustmentBody(amount_credits=Decimal("0.25"))
+    def test_admin_balance_add_is_audited_and_supports_cents(self):
+        body = server.BalanceAdjustmentBody(amount_credits=Decimal("0.25"), action="add")
         with patch.object(server, "store_connection", self.fake_store_connection):
             result = asyncio.run(
-                server.store_admin_credit_customer("buyer@example.test", body)
+                server.store_admin_adjust_customer_balance("buyer@example.test", body)
             )
         balance = self.connection.execute(
             "SELECT balance_credits FROM customers WHERE email='buyer@example.test'"
@@ -134,6 +144,36 @@ class StoreCreditTests(unittest.TestCase):
         self.assertAlmostEqual(float(ledger["balance_after_credits"]), 0.55)
         self.assertIsNone(ledger["purchase_id"])
         self.assertAlmostEqual(result["balance_credits"], 0.55)
+
+    def test_admin_can_reduce_balance_without_going_below_zero(self):
+        body = server.BalanceAdjustmentBody(amount_credits=Decimal("0.15"), action="subtract")
+        with patch.object(server, "store_connection", self.fake_store_connection):
+            result = asyncio.run(
+                server.store_admin_adjust_customer_balance("buyer@example.test", body)
+            )
+        balance = self.connection.execute(
+            "SELECT balance_credits FROM customers WHERE email='buyer@example.test'"
+        ).fetchone()[0]
+        ledger = self.connection.execute(
+            "SELECT amount_credits, balance_after_credits FROM store_wallet_ledger"
+        ).fetchone()
+        self.assertAlmostEqual(float(balance), 0.15)
+        self.assertAlmostEqual(float(ledger["amount_credits"]), -0.15)
+        self.assertAlmostEqual(float(ledger["balance_after_credits"]), 0.15)
+        self.assertAlmostEqual(result["balance_credits"], 0.15)
+
+    def test_admin_cannot_reduce_balance_below_zero(self):
+        body = server.BalanceAdjustmentBody(amount_credits=Decimal("0.31"), action="subtract")
+        with patch.object(server, "store_connection", self.fake_store_connection):
+            with self.assertRaises(HTTPException) as error:
+                asyncio.run(
+                    server.store_admin_adjust_customer_balance("buyer@example.test", body)
+                )
+        self.assertEqual(error.exception.status_code, 409)
+        balance = self.connection.execute(
+            "SELECT balance_credits FROM customers WHERE email='buyer@example.test'"
+        ).fetchone()[0]
+        self.assertAlmostEqual(float(balance), 0.30)
 
 
 if __name__ == "__main__":

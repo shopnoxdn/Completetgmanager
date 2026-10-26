@@ -654,39 +654,53 @@ async function loadStoreAdminCustomers() {
               <strong>${esc(customer.email)}</strong>
               <span class="text-dim text-sm">Balance: ${formatCredits(customer.balance_credits)} credits</span>
             </div>
-            <div class="store-admin-credit-controls">
-              <input class="input" type="number" min="0.01" max="1000000000" step="0.01"
-                placeholder="Credits" aria-label="Credits to add for ${esc(customer.email)}">
-              <button class="btn btn-primary btn-sm store-add-customer-balance"
-                type="button" data-customer-email="${esc(customer.email)}">Add credits</button>
-            </div>
+            <button class="btn btn-secondary btn-sm store-use-customer-email"
+              type="button" data-customer-email="${esc(customer.email)}">Use email</button>
           </article>`).join('')}
       </div>`;
-    el.querySelectorAll('.store-add-customer-balance').forEach(button => {
-      button.addEventListener('click', () => addStoreCustomerBalance(button.dataset.customerEmail, button));
+    el.querySelectorAll('.store-use-customer-email').forEach(button => {
+      button.addEventListener('click', () => {
+        const emailInput = document.getElementById('store-balance-email');
+        emailInput.value = button.dataset.customerEmail;
+        emailInput.focus();
+      });
     });
   } catch (e) {
     el.innerHTML = `<div class="empty-state"><p style="color:var(--danger)">${esc(e.message)}</p></div>`;
   }
 }
 
-async function addStoreCustomerBalance(email, button) {
-  const row = button.closest('.store-admin-product');
-  const amountInput = row?.querySelector('input[type="number"]');
-  const amount = Number(amountInput?.value);
+async function adjustStoreCustomerBalance(action) {
+  const emailInput = document.getElementById('store-balance-email');
+  const amountInput = document.getElementById('store-balance-amount');
+  const result = document.getElementById('store-balance-adjust-result');
+  const email = emailInput.value.trim();
+  const amountText = amountInput.value.trim();
+  const amount = amountText ? Number(amountText) : NaN;
   const cents = Math.round(amount * 100);
-  if (!Number.isFinite(amount) || amount <= 0 || amount > 1000000000 ||
-      Math.abs(amount * 100 - cents) > 1e-7) {
-    return toast('Enter a positive amount with up to 2 decimal places', 'warn');
+  if (!emailInput.checkValidity()) {
+    emailInput.reportValidity();
+    emailInput.focus();
+    return;
   }
-  if (!confirm(`Add ${formatCredits(amount)} credits to ${email}? Confirm the Telegram top-up first.`)) return;
+  if (!Number.isFinite(amount) || amount < 0.01 || amount > 1000000000 ||
+      Math.abs(amount * 100 - cents) > 1e-7) {
+    amountInput.focus();
+    return toast('Enter an amount of at least 0.01 with up to 2 decimal places', 'warn');
+  }
+  const verb = action === 'add' ? 'Add' : 'Reduce';
+  if (!confirm(`${verb} ${formatCredits(amount)} credits for ${email}?`)) return;
   try {
-    await post(`/store/admin/customers/${encodeURIComponent(email)}/balance`, {
+    const updated = await post(`/store/admin/customers/${encodeURIComponent(email)}/balance`, {
       amount_credits: amount,
+      action,
     });
+    result.textContent = `${email}: ${verb.toLowerCase()} ${formatCredits(amount)} credits. New balance: ${formatCredits(updated.balance_credits)} credits.`;
     toast('Customer balance updated', 'success');
+    amountInput.value = '';
     await loadStoreAdminCustomers();
   } catch (e) {
+    if (result) result.textContent = e.message;
     toast('Error: ' + e.message, 'error');
   }
 }
@@ -698,7 +712,7 @@ function showStoreProductForm(productId = null) {
   document.getElementById('store-product-name').value = product?.name || '';
   document.getElementById('store-product-category').value = product?.category || '';
   document.getElementById('store-product-description').value = product?.description || '';
-  document.getElementById('store-product-price').value = product?.price_credits ?? 0;
+  document.getElementById('store-product-price').value = product?.price_credits ?? 0.01;
   document.getElementById('store-product-stock').value = product?.stock ?? 1;
   document.getElementById('store-product-limit').value = product?.per_user_limit ?? 1;
   document.getElementById('store-product-form').style.display = 'block';
@@ -713,7 +727,7 @@ function hideStoreProductForm() {
     const input = document.getElementById(id);
     if (input) input.value = '';
   });
-  document.getElementById('store-product-price').value = '0';
+  document.getElementById('store-product-price').value = '0.01';
   document.getElementById('store-product-stock').value = '1';
   document.getElementById('store-product-limit').value = '1';
 }
@@ -737,10 +751,10 @@ async function saveStoreProduct() {
   }
   const priceMinorUnits = Math.round(payload.price_credits * 100);
   if (!Number.isFinite(payload.price_credits) ||
-      payload.price_credits < 0 ||
+      payload.price_credits < 0.01 ||
       payload.price_credits > 1000000000 ||
       Math.abs(payload.price_credits * 100 - priceMinorUnits) > 1e-7) {
-    return toast('Price must be a non-negative amount with up to 2 decimal places', 'warn');
+    return toast('Price must be at least 0.01 with up to 2 decimal places', 'warn');
   }
   if (!Number.isSafeInteger(payload.stock) || payload.stock < 0) {
     return toast('Stock must be a whole number of 0 or more', 'warn');

@@ -714,13 +714,7 @@ select.input option { background: var(--bg3); }
 .store-wallet-details { flex: 1; min-width: 180px; }
 .store-balance { margin: 4px 0; font-size: 26px; font-weight: 800; color: var(--accent); }
 .store-topup-link { white-space: nowrap; }
-.store-admin-credit-controls {
-  display: flex; align-items: center; gap: 8px;
-  width: min(100%, 320px);
-}
-.store-admin-credit-controls .input { min-width: 0; }
 @media (max-width: 520px) {
   .store-wallet-card { align-items: stretch; flex-direction: column; }
   .store-topup-link { width: 100%; }
-  .store-admin-credit-controls { width: 100%; }
 }

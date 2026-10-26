@@ -2,7 +2,7 @@ import os, re, glob, shutil, sqlite3, asyncio, json, io, zipfile, tempfile, secr
 import base64, hashlib, hmac, time
 from uuid import uuid4
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Literal
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -535,7 +535,7 @@ class StoreProductBody(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     category: str = Field(default="", max_length=60)
     description: str = Field(default="", max_length=1000)
-    price_credits: Decimal = Field(ge=Decimal("0"), le=Decimal("1000000000"))
+    price_credits: Decimal = Field(gt=Decimal("0"), le=Decimal("1000000000"))
     stock: int = Field(ge=0, le=1000000)
     per_user_limit: int = Field(ge=1, le=1000000)
 
@@ -656,6 +656,7 @@ class StorePurchaseBody(BaseModel):
 
 class BalanceAdjustmentBody(BaseModel):
     amount_credits: Decimal
+    action: Literal["add", "subtract"]
 
 def serialize_store_product(row):
     return {
@@ -817,11 +818,12 @@ async def store_admin_customers():
     ]
 
 @app.post("/api/store/admin/customers/{email}/balance")
-async def store_admin_credit_customer(email: str, body: BalanceAdjustmentBody):
+async def store_admin_adjust_customer_balance(email: str, body: BalanceAdjustmentBody):
     email = normalize_customer_email(email)
     amount = normalize_credit_amount(body.amount_credits)
     if amount <= 0:
-        raise HTTPException(422, "Credit amount must be greater than zero")
+        raise HTTPException(422, "Adjustment amount must be greater than zero")
+    delta = amount if body.action == "add" else -amount
     now = datetime.now(timezone.utc).isoformat()
     with store_connection() as c:
         c.execute("BEGIN IMMEDIATE")
@@ -831,9 +833,11 @@ async def store_admin_credit_customer(email: str, body: BalanceAdjustmentBody):
         if not customer:
             c.rollback()
             raise HTTPException(404, "Customer not found")
-        new_balance = (
-            normalize_credit_amount(customer["balance_credits"]) + amount
-        ).quantize(STORE_CREDIT_QUANTUM)
+        current_balance = normalize_credit_amount(customer["balance_credits"])
+        new_balance = (current_balance + delta).quantize(STORE_CREDIT_QUANTUM)
+        if new_balance < 0:
+            c.rollback()
+            raise HTTPException(409, "Balance cannot be reduced below zero")
         c.execute(
             "UPDATE customers SET balance_credits=? WHERE email=?",
             (credit_amount_sql(new_balance), email),
@@ -842,13 +846,14 @@ async def store_admin_credit_customer(email: str, body: BalanceAdjustmentBody):
             """INSERT INTO store_wallet_ledger
                (customer_email, purchase_id, amount_credits, balance_after_credits, created_at)
                VALUES (?, NULL, ?, ?, ?)""",
-            (email, credit_amount_sql(amount), credit_amount_sql(new_balance), now),
+            (email, format(delta, "f"), credit_amount_sql(new_balance), now),
         )
         c.commit()
     return {
         "success": True,
         "email": email,
-        "credited_credits": credit_amount_json(amount),
+        "action": body.action,
+        "adjusted_credits": credit_amount_json(amount),
         "balance_credits": credit_amount_json(new_balance),
     }
 

@@ -238,8 +238,8 @@
               </div>
               <div class="grid-3">
                 <div class="input-group">
-                  <label class="input-label" for="store-product-price">Price (credits, up to 2 decimal places)</label>
-                  <input class="input" id="store-product-price" type="number" min="0" max="1000000000" step="0.01" value="0"/>
+                  <label class="input-label" for="store-product-price">Price (credits, minimum 0.01)</label>
+                  <input class="input" id="store-product-price" type="number" min="0.01" max="1000000000" step="0.01" value="0.01"/>
                 </div>
                 <div class="input-group">
                   <label class="input-label" for="store-product-stock">Stock</label>
@@ -262,10 +262,25 @@
             <div class="card-header">
               <div>
                 <div class="card-title">Customer Balances</div>
-                <div class="text-dim text-sm">Add credits after confirming the top-up through Telegram.</div>
+                <div class="text-dim text-sm">Enter a customer email to add or reduce credits. Confirm Telegram top-ups before adding.</div>
               </div>
               <button class="btn btn-secondary btn-sm" type="button" onclick="loadStoreAdminCustomers()">Refresh</button>
             </div>
+            <div class="grid-2">
+              <div class="input-group">
+                <label class="input-label" for="store-balance-email">Customer email</label>
+                <input class="input" id="store-balance-email" type="email" maxlength="254" placeholder="name@example.com" required/>
+              </div>
+              <div class="input-group">
+                <label class="input-label" for="store-balance-amount">Amount (credits)</label>
+                <input class="input" id="store-balance-amount" type="number" min="0.01" max="1000000000" step="0.01" placeholder="0.25" required/>
+              </div>
+            </div>
+            <div class="flex gap-2 mb-3">
+              <button class="btn btn-primary" type="button" onclick="adjustStoreCustomerBalance('add')">Add balance</button>
+              <button class="btn btn-danger" type="button" onclick="adjustStoreCustomerBalance('subtract')">Reduce balance</button>
+            </div>
+            <div id="store-balance-adjust-result" class="text-dim text-sm mb-3" aria-live="polite"></div>
             <div id="store-admin-customers"><div class="empty-state"><p>Loading customers…</p></div></div>
           </div>
         </div>
@@ -815,6 +830,6 @@
   </div>
 </div>
 
-<script src="/script.js?v=store-decimals-wallet-v1"></script>
+<script src="/script.js?v=store-balance-adjust-v2"></script>
 </body>
 </html>
